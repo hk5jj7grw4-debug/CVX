@@ -5,6 +5,7 @@ using CVXkernel.Client;
 await TestMessageParserAsync();
 await TestCallbackReceiverAsync();
 await TestManagerClientAsync();
+TestRuntimeOwnership();
 Console.WriteLine("全部测试通过");
 
 static Task TestMessageParserAsync()
@@ -78,6 +79,34 @@ static async Task TestManagerClientAsync()
     Equal("local-test-token", handler.LastRequest?.Headers.GetValues("X-Robot-Token").Single(), "Manager 本地鉴权");
     Equal(true, status.GvxApiReady, "Manager 状态反序列化");
     Equal(19088, status.GvxApiPort, "GVx 端口反序列化");
+}
+
+static void TestRuntimeOwnership()
+{
+    var directory = Path.Combine(Path.GetTempPath(), "cvxkernel-tests", Guid.NewGuid().ToString("N"));
+    var lockPath = Path.Combine(directory, ".runtime-owner.lock");
+    try
+    {
+        using (RuntimeOwnershipLease.Acquire(lockPath))
+        {
+            var blocked = false;
+            try
+            {
+                using var duplicate = RuntimeOwnershipLease.Acquire(lockPath);
+            }
+            catch (InvalidOperationException)
+            {
+                blocked = true;
+            }
+            Equal(true, blocked, "运行时重复所有权");
+        }
+
+        using var reacquired = RuntimeOwnershipLease.Acquire(lockPath);
+    }
+    finally
+    {
+        if (Directory.Exists(directory)) Directory.Delete(directory, recursive: true);
+    }
 }
 
 static void Equal<T>(T expected, T actual, string name)
