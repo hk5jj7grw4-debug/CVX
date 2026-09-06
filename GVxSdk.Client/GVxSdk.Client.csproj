@@ -1,0 +1,15 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net8.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <GenerateDocumentationFile>true</GenerateDocumentationFile>
+    <NoWarn>$(NoWarn);1591</NoWarn>
+    <PackageId>GVxSdk.Client</PackageId>
+    <Version>0.1.5</Version>
+    <Authors>gVxSdk</Authors>
+    <Description>Managed .NET client for the local gVx WeChat middleware HTTP API.</Description>
+    <PackageTags>wechat;sdk;windows</PackageTags>
+    <RepositoryUrl>https://github.com/olaria01/gVxSdk</RepositoryUrl>
+  </PropertyGroup>
+</Project>

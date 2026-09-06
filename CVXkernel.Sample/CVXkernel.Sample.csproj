@@ -1,0 +1,11 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net8.0</TargetFramework>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="../CVXkernel.Client/CVXkernel.Client.csproj" />
+    <!-- GVx remains a direct source dependency of the business application. -->
+    <ProjectReference Include="../GVxSdk.Client/GVxSdk.Client.csproj" />
+  </ItemGroup>
+</Project>

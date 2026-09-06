@@ -1,0 +1,19 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net8.0</TargetFramework>
+    <AssemblyName>CVXkernel.Client</AssemblyName>
+    <RootNamespace>CVXkernel.Client</RootNamespace>
+    <Version>0.1.0</Version>
+    <PackageId>CVXkernel.Client</PackageId>
+    <Authors>Sao</Authors>
+    <Description>Client-side lifecycle, deployment, and callback receiver for the CVXkernel integration.</Description>
+    <PackageTags>wechat robot lifecycle windows</PackageTags>
+    <PackageRequireLicenseAcceptance>false</PackageRequireLicenseAcceptance>
+    <PackageReadmeFile>README.md</PackageReadmeFile>
+    <GenerateDocumentationFile>true</GenerateDocumentationFile>
+    <NoWarn>$(NoWarn);1591</NoWarn>
+  </PropertyGroup>
+  <ItemGroup>
+    <None Include="../README.md" Pack="true" PackagePath="/" Link="README.md" />
+  </ItemGroup>
+</Project>
