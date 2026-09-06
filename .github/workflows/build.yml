@@ -18,17 +18,18 @@ jobs:
 
     steps:
       - name: Check out repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Set up .NET 8
-        uses: actions/setup-dotnet@v4
+        uses: actions/setup-dotnet@v6
         with:
           dotnet-version: 8.0.x
 
       - name: Set up Go
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@v7
         with:
           go-version-file: GVxSdk.Go/go.mod
+          cache: false
 
       - name: Resolve package version
         shell: pwsh
@@ -91,7 +92,7 @@ jobs:
           $lines | Set-Content artifacts/SHA256SUMS.txt -Encoding ascii
 
       - name: Upload workflow artifacts
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: CVXkernel-${{ env.CVX_VERSION }}-windows-sdk
           path: artifacts/*
