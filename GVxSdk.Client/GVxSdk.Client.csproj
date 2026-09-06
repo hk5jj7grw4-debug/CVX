@@ -5,14 +5,16 @@
     <Nullable>enable</Nullable>
     <GenerateDocumentationFile>true</GenerateDocumentationFile>
     <NoWarn>$(NoWarn);1591</NoWarn>
-    <PackageId>GVxSdk.Client</PackageId>
+    <PackageId>CVXkernel.GVxSdk.Client</PackageId>
     <Version>0.1.5</Version>
-    <Authors>gVxSdk</Authors>
-    <Description>Managed .NET client for the local gVx WeChat middleware HTTP API.</Description>
-    <PackageTags>wechat;sdk;windows</PackageTags>
+    <Authors>Sao</Authors>
+    <Description>Managed .NET client for the local gVx WeChat middleware HTTP API, distributed as part of CVXkernel.</Description>
+    <PackageTags>cvxkernel;wechat;sdk;windows</PackageTags>
     <PackageLicenseExpression>MIT</PackageLicenseExpression>
     <PackageReadmeFile>README.md</PackageReadmeFile>
-    <RepositoryUrl>https://github.com/olaria01/gVxSdk</RepositoryUrl>
+    <PackageProjectUrl>https://github.com/hk5jj7grw4-debug/CVXkernel</PackageProjectUrl>
+    <RepositoryUrl>https://github.com/hk5jj7grw4-debug/CVXkernel.git</RepositoryUrl>
+    <RepositoryType>git</RepositoryType>
   </PropertyGroup>
   <ItemGroup>
     <None Include="../README.md" Pack="true" PackagePath="/" Link="README.md" />
