@@ -47,6 +47,17 @@ internal static class CredentialStore
         return credentials;
     }
 
+    public static void Save(AppCredentials credentials)
+    {
+        var directory = Path.GetDirectoryName(FilePath);
+        if (!string.IsNullOrEmpty(directory))
+        {
+            Directory.CreateDirectory(directory);
+        }
+
+        File.WriteAllText(FilePath, JsonSerializer.Serialize(credentials, JsonOptions));
+    }
+
     private static void OverrideFromEnvironment(AppCredentials credentials)
     {
         credentials.UpdateServer = Env("CVX_UPDATE_SERVER") ?? credentials.UpdateServer;

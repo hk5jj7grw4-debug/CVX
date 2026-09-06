@@ -67,6 +67,27 @@
                 <StackPanel>
                     <Border Style="{StaticResource Card}">
                         <StackPanel>
+                            <TextBlock FontSize="15" FontWeight="SemiBold" Text="配置" />
+                            <TextBlock Style="{StaticResource LabelText}" Margin="0,12,0,6" Text="组件服务 URL" />
+                            <TextBox x:Name="UpdateServerBox" />
+                            <TextBlock Style="{StaticResource LabelText}" Margin="0,12,0,6" Text="组件 Token" />
+                            <PasswordBox x:Name="ComponentTokenBox" />
+                            <TextBlock Style="{StaticResource LabelText}" Margin="0,12,0,6" Text="内核端口" />
+                            <TextBox x:Name="GvxPortBox" Text="19088" />
+                            <Button x:Name="SaveConfigButton"
+                                    Style="{StaticResource GhostButton}"
+                                    Content="保存配置"
+                                    Click="SaveConfigButton_Click"
+                                    Margin="0,14,0,0" />
+                            <TextBlock Style="{StaticResource MutedText}"
+                                       Margin="0,8,0,0"
+                                       TextWrapping="Wrap"
+                                       Text="首次运行请填写地址和 Token 后保存。已连接后修改将在下次启动生效。" />
+                        </StackPanel>
+                    </Border>
+
+                    <Border Style="{StaticResource Card}" Margin="0,12,0,0">
+                        <StackPanel>
                             <TextBlock FontSize="15" FontWeight="SemiBold" Text="生命周期" />
                             <UniformGrid Columns="2" Margin="0,14,0,0">
                                 <Button x:Name="StartButton"

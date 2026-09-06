@@ -18,8 +18,6 @@ public partial class MainWindow : Window
     private const int MaxLogItems = 400;
     private const string CallbackUrl = "http://127.0.0.1:5000/api/recvMsg";
 
-    private static readonly AppCredentials Credentials = CredentialStore.Load();
-
     private readonly ObservableCollection<ChatLogItem> _logItems = [];
     private readonly ObservableCollection<RoomOption> _rooms = [];
     private readonly SolidColorBrush _okBrush = BrushFrom("#07C160");
@@ -27,14 +25,9 @@ public partial class MainWindow : Window
     private readonly SolidColorBrush _errorBrush = BrushFrom("#E64545");
     private readonly HttpClient _http = new();
     private readonly Dictionary<string, ImageSource> _avatarCache = new(StringComparer.OrdinalIgnoreCase);
-    private readonly WechatRobotRuntime _runtime = new(new WechatRobotOptions
-    {
-        UpdateServerUrl = string.IsNullOrWhiteSpace(Credentials.UpdateServer) ? null : Credentials.UpdateServer,
-        ComponentToken = string.IsNullOrWhiteSpace(Credentials.ComponentToken) ? null : Credentials.ComponentToken,
-        GvxApiPort = Credentials.GvxApiPort,
-        CallbackUrl = CallbackUrl
-    });
-    private readonly CVXClient _sdk = new($"http://127.0.0.1:{Credentials.GvxApiPort}");
+
+    private WechatRobotRuntime? _runtime;
+    private CVXClient? _sdk;
 
     private ImageSource? _selfAvatar;
     private string? _selfAvatarUrl;
@@ -50,8 +43,78 @@ public partial class MainWindow : Window
         MessageList.ItemsSource = _logItems;
         RoomBox.ItemsSource = _rooms;
         TargetBox.Items.Add("filehelper");
-        GvxApiText.Text = $"127.0.0.1:{Credentials.GvxApiPort}";
         _http.DefaultRequestHeaders.UserAgent.ParseAdd("Mozilla/5.0");
+        ApplyCredentialsToForm(CredentialStore.Load());
+        GvxApiText.Text = $"127.0.0.1:{ReadCredentialsFromForm().GvxApiPort}";
+        HeaderStatusText.Text = "请填写配置后接入";
+
+        Loaded += async (_, _) => await InitializeClientAsync();
+        Closing += OnWindowClosing;
+    }
+
+    private async Task InitializeClientAsync()
+    {
+        var credentials = ReadCredentialsFromForm();
+        if (string.IsNullOrWhiteSpace(credentials.UpdateServer)
+            && string.IsNullOrWhiteSpace(credentials.ComponentToken))
+        {
+            HeaderStatusText.Text = "请先填写组件服务 URL 和 Token";
+            return;
+        }
+
+        await ConnectKernelAsync();
+    }
+
+    private void SaveConfigButton_Click(object sender, RoutedEventArgs e)
+    {
+        var credentials = ReadCredentialsFromForm();
+        CredentialStore.Save(credentials);
+        GvxApiText.Text = $"127.0.0.1:{credentials.GvxApiPort}";
+        AppendLog("sys", "系统", "配置已保存。");
+        HeaderStatusText.Text = "配置已保存，可点重新接入";
+    }
+
+    private AppCredentials ReadCredentialsFromForm()
+    {
+        var port = 19088;
+        if (int.TryParse(GvxPortBox.Text?.Trim(), out var parsed) && parsed is > 0 and <= 65535)
+        {
+            port = parsed;
+        }
+
+        return new AppCredentials
+        {
+            UpdateServer = UpdateServerBox.Text?.Trim() ?? "",
+            ComponentToken = ComponentTokenBox.Password?.Trim() ?? "",
+            GvxApiPort = port
+        };
+    }
+
+    private void ApplyCredentialsToForm(AppCredentials credentials)
+    {
+        UpdateServerBox.Text = credentials.UpdateServer;
+        ComponentTokenBox.Password = credentials.ComponentToken;
+        GvxPortBox.Text = credentials.GvxApiPort <= 0 ? "19088" : credentials.GvxApiPort.ToString();
+    }
+
+    private void EnsureRuntime()
+    {
+        if (_runtime is not null)
+        {
+            return;
+        }
+
+        var credentials = ReadCredentialsFromForm();
+        CredentialStore.Save(credentials);
+        GvxApiText.Text = $"127.0.0.1:{credentials.GvxApiPort}";
+        _sdk = new CVXClient($"http://127.0.0.1:{credentials.GvxApiPort}");
+        _runtime = new WechatRobotRuntime(new WechatRobotOptions
+        {
+            UpdateServerUrl = string.IsNullOrWhiteSpace(credentials.UpdateServer) ? null : credentials.UpdateServer,
+            ComponentToken = string.IsNullOrWhiteSpace(credentials.ComponentToken) ? null : credentials.ComponentToken,
+            GvxApiPort = credentials.GvxApiPort,
+            CallbackUrl = CallbackUrl
+        });
 
         _runtime.MessageReceived += (_, message) =>
         {
@@ -76,14 +139,6 @@ public partial class MainWindow : Window
 
         _runtime.StatusChanged += OnRuntimeStatusChanged;
         RenderStatus(_runtime.Status);
-
-        Loaded += async (_, _) => await InitializeClientAsync();
-        Closing += OnWindowClosing;
-    }
-
-    private async Task InitializeClientAsync()
-    {
-        await ConnectKernelAsync();
     }
 
     private void OnRuntimeStatusChanged(object? sender, WechatRobotStatus status)
@@ -122,11 +177,15 @@ public partial class MainWindow : Window
         try
         {
             SetBusy(true);
-            await _runtime.ConnectAsync();
+            EnsureRuntime();
+            await _runtime!.ConnectAsync();
         }
         catch (Exception)
         {
-            RenderStatus(_runtime.Status);
+            if (_runtime is not null)
+            {
+                RenderStatus(_runtime.Status);
+            }
         }
         finally
         {
@@ -144,12 +203,16 @@ public partial class MainWindow : Window
         try
         {
             SetBusy(true);
+            EnsureRuntime();
             ClearAccount();
-            await _runtime.RestartAsync();
+            await _runtime!.RestartAsync();
         }
         catch (Exception)
         {
-            RenderStatus(_runtime.Status);
+            if (_runtime is not null)
+            {
+                RenderStatus(_runtime.Status);
+            }
         }
         finally
         {
@@ -168,7 +231,7 @@ public partial class MainWindow : Window
         try
         {
             SetBusy(true);
-            var rooms = await _sdk.Room.GetChatroomListAsync();
+            var rooms = await _sdk!.Room.GetChatroomListAsync();
             _rooms.Clear();
             foreach (var room in rooms)
             {
@@ -235,7 +298,7 @@ public partial class MainWindow : Window
                         return;
                     }
 
-                    await _sdk.Message.SendImageAsync(target, imagePath);
+                    await _sdk!.Message.SendImageAsync(target, imagePath);
                     AppendLog("send", "我", $"[图片] {imagePath} → {target}", target);
                     break;
                 case "文件":
@@ -245,12 +308,12 @@ public partial class MainWindow : Window
                         return;
                     }
 
-                    await _sdk.Message.SendFileAsync(target, filePath);
+                    await _sdk!.Message.SendFileAsync(target, filePath);
                     AppendLog("send", "我", $"[文件] {filePath} → {target}", target);
                     break;
                 case "拍一拍":
                     var patWxid = string.IsNullOrWhiteSpace(content) ? target : content;
-                    await _sdk.Message.SendPatAsync(target, patWxid);
+                    await _sdk!.Message.SendPatAsync(target, patWxid);
                     AppendLog("send", "我", $"[拍一拍] {patWxid} @ {target}", target);
                     break;
                 default:
@@ -260,7 +323,7 @@ public partial class MainWindow : Window
                         return;
                     }
 
-                    await _sdk.Message.SendTextAsync(target, content);
+                    await _sdk!.Message.SendTextAsync(target, content);
                     AppendLog("send", "我", content, target);
                     SendContentBox.Clear();
                     break;
@@ -284,7 +347,7 @@ public partial class MainWindow : Window
         LoginStateText.Text = status.ApiReady
             ? status.IsLoggedIn ? "已登录" : "未登录"
             : "—";
-        GvxApiText.Text = $"127.0.0.1:{Credentials.GvxApiPort}";
+        GvxApiText.Text = $"127.0.0.1:{ReadCredentialsFromForm().GvxApiPort}";
         CallbackReadyText.Text = status.CallbackUrl.ToString();
         ComponentVersionText.Text = string.IsNullOrWhiteSpace(status.ComponentVersion)
             ? "—"
@@ -392,6 +455,11 @@ public partial class MainWindow : Window
 
     private async Task RefreshAccountAsync()
     {
+        if (_sdk is null)
+        {
+            return;
+        }
+
         try
         {
             var login = await _sdk.System.GetLoginStatusAsync();
@@ -406,7 +474,7 @@ public partial class MainWindow : Window
             string? avatarUrl = null;
             try
             {
-                var profile = await _sdk.Contact.GetProfileNewAsync();
+                var profile = await _sdk!.Contact.GetProfileNewAsync();
                 nick = profile.UserInfo?.NickName?.Value;
                 wxid = profile.UserInfo?.UserName?.Value ?? wxid;
                 avatarUrl = profile.UserInfoExt?.SmallHeadImgUrl
@@ -460,6 +528,7 @@ public partial class MainWindow : Window
         RestartButton.IsEnabled = !busy;
         SendButton.IsEnabled = !busy;
         RefreshRoomsButton.IsEnabled = !busy;
+        SaveConfigButton.IsEnabled = !busy;
         if (busy)
         {
             StatusDot.Background = _busyBrush;
@@ -538,7 +607,7 @@ public partial class MainWindow : Window
         }
 
         var url = avatarUrl;
-        if (string.IsNullOrWhiteSpace(url))
+        if (string.IsNullOrWhiteSpace(url) && _sdk is not null)
         {
             try
             {
@@ -639,17 +708,20 @@ public partial class MainWindow : Window
 
         e.Cancel = true;
         _closing = true;
-        _runtime.StatusChanged -= OnRuntimeStatusChanged;
-        try
+        if (_runtime is not null)
         {
-            await _runtime.DisposeAsync();
-        }
-        catch (Exception)
-        {
-            // Closing still proceeds so the window cannot get stuck.
+            _runtime.StatusChanged -= OnRuntimeStatusChanged;
+            try
+            {
+                await _runtime.DisposeAsync();
+            }
+            catch (Exception)
+            {
+                // Closing still proceeds so the window cannot get stuck.
+            }
         }
 
-        _sdk.Dispose();
+        _sdk?.Dispose();
         _http.Dispose();
         Close();
     }
