@@ -1,11 +1,11 @@
-# gVxSdk
+# CVXkernel Go SDK
 
 微信中间件 SDK，提供 Go 客户端和可供 WinForms/WPF 使用的 .NET 托管 DLL。
 
 ## 安装
 
 ```bash
-go get github.com/olaria01/gVxSdk/sdk/go
+go get github.com/hk5jj7grw4-debug/CVXkernel/GVxSdk.Go
 ```
 
 ## 快速开始
@@ -17,7 +17,7 @@ package main
 
 import (
     "log"
-    "github.com/olaria01/gVxSdk/sdk/go"
+    "github.com/hk5jj7grw4-debug/CVXkernel/GVxSdk.Go"
 )
 
 func main() {
@@ -43,7 +43,7 @@ import (
     "log"
     "net/http"
     
-    "github.com/olaria01/gVxSdk/sdk/go/types"
+    "github.com/hk5jj7grw4-debug/CVXkernel/GVxSdk.Go/types"
 )
 
 func handleWebhook(w http.ResponseWriter, r *http.Request) {
@@ -96,7 +96,7 @@ await vx.Message.SendTextAsync("filehelper", "Hello from .NET");
 
 本地中间件只监听 `127.0.0.1` 时可以不传 Token。若中间件启用了鉴权，可在创建 `GVxClient` 时传入可选的 `authToken`。
 
-完整说明见 [.NET SDK 文档](../dotnet/README.md)。
+对应的 .NET 客户端源码见 [`GVxSdk.Client`](../GVxSdk.Client)。
 
 ## 系统功能示例
 
@@ -168,5 +168,5 @@ for _, member := range resp.NewChatroomData.ChatRoomMember {
 详细 API 文档请查看代码注释或使用 `go doc` 命令：
 
 ```bash
-go doc github.com/olaria01/gVxSdk/sdk/go/api MessageAPI.SendTextMsg
+go doc github.com/hk5jj7grw4-debug/CVXkernel/GVxSdk.Go/api MessageAPI.SendTextMsg
 ```

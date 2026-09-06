@@ -8,7 +8,7 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/olaria01/gVxSdk/sdk/go/api"
+	"github.com/hk5jj7grw4-debug/CVXkernel/GVxSdk.Go/api"
 )
 
 // Client 微信 SDK 客户端

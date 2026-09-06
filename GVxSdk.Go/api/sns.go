@@ -4,7 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 
-	"github.com/olaria01/gVxSdk/sdk/go/types"
+	"github.com/hk5jj7grw4-debug/CVXkernel/GVxSdk.Go/types"
 )
 
 // SNSAPI 朋友圈相关接口

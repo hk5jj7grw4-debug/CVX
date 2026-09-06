@@ -4,7 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 
-	"github.com/olaria01/gVxSdk/sdk/go/types"
+	"github.com/hk5jj7grw4-debug/CVXkernel/GVxSdk.Go/types"
 )
 
 // PaymentAPI 支付相关接口

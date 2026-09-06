@@ -1,5 +1,5 @@
 
-gVxSdk 开发规范总结
+CVXkernel Go SDK 开发规范总结
 1. 项目结构
 gVxSdk/
 ├── client.go           # 主客户端，统一入口
@@ -190,7 +190,7 @@ test: 测试相关
 chore: 构建/工具相关
 8.2 模块版本
 // go.mod
-module github.com/yourusername/gvxsdk
+module github.com/hk5jj7grw4-debug/CVXkernel/GVxSdk.Go
 
 go 1.21
 9. 使用示例规范
