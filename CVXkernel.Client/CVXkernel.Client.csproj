@@ -9,6 +9,7 @@
     <Description>Client-side lifecycle, deployment, and callback receiver for the CVXkernel integration.</Description>
     <PackageTags>wechat robot lifecycle windows</PackageTags>
     <PackageRequireLicenseAcceptance>false</PackageRequireLicenseAcceptance>
+    <PackageLicenseExpression>MIT</PackageLicenseExpression>
     <PackageReadmeFile>README.md</PackageReadmeFile>
     <GenerateDocumentationFile>true</GenerateDocumentationFile>
     <NoWarn>$(NoWarn);1591</NoWarn>

@@ -10,6 +10,11 @@
     <Authors>gVxSdk</Authors>
     <Description>Managed .NET client for the local gVx WeChat middleware HTTP API.</Description>
     <PackageTags>wechat;sdk;windows</PackageTags>
+    <PackageLicenseExpression>MIT</PackageLicenseExpression>
+    <PackageReadmeFile>README.md</PackageReadmeFile>
     <RepositoryUrl>https://github.com/olaria01/gVxSdk</RepositoryUrl>
   </PropertyGroup>
+  <ItemGroup>
+    <None Include="../README.md" Pack="true" PackagePath="/" Link="README.md" />
+  </ItemGroup>
 </Project>

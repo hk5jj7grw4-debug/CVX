@@ -1,0 +1,111 @@
+name: Build Windows SDK artifacts
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: windows-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up .NET 8
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 8.0.x
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: GVxSdk.Go/go.mod
+
+      - name: Resolve package version
+        shell: pwsh
+        run: |
+          $version = "0.1.0"
+          if ($env:GITHUB_REF_TYPE -eq "tag") {
+            if ($env:GITHUB_REF_NAME -notmatch '^v(?<version>\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?)$') {
+              throw "Release tag must match v<major>.<minor>.<patch>[-prerelease]."
+            }
+            $version = $Matches.version
+          }
+          "CVX_VERSION=$version" | Out-File -FilePath $env:GITHUB_ENV -Append
+
+      - name: Restore .NET projects
+        run: dotnet restore CVXkernel.sln
+
+      - name: Build .NET projects
+        run: dotnet build CVXkernel.sln -c Release --no-restore
+
+      - name: Run .NET tests
+        run: dotnet run --project CVXkernel.Client.Tests -c Release --no-build
+
+      - name: Run Go tests
+        working-directory: GVxSdk.Go
+        run: go test ./...
+
+      - name: Pack NuGet packages
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Path artifacts -Force | Out-Null
+          dotnet pack CVXkernel.Client/CVXkernel.Client.csproj `
+            -c Release -o artifacts `
+            -p:Version=${{ env.CVX_VERSION }} `
+            -p:IncludeSymbols=true -p:SymbolPackageFormat=snupkg
+          dotnet pack GVxSdk.Client/GVxSdk.Client.csproj `
+            -c Release --no-build -o artifacts `
+            -p:IncludeSymbols=true -p:SymbolPackageFormat=snupkg
+
+      - name: Create DLL bundle and checksums
+        shell: pwsh
+        run: |
+          $bundle = "artifacts/CVXkernel-${{ env.CVX_VERSION }}-dotnet8-win"
+          New-Item -ItemType Directory -Path $bundle -Force | Out-Null
+          Copy-Item CVXkernel.Client/bin/Release/net8.0/CVXkernel.Client.dll $bundle
+          Copy-Item CVXkernel.Client/bin/Release/net8.0/CVXkernel.Client.xml $bundle
+          Copy-Item GVxSdk.Client/bin/Release/net8.0/GVxSdk.Client.dll $bundle
+          Copy-Item GVxSdk.Client/bin/Release/net8.0/GVxSdk.Client.xml $bundle
+          Copy-Item README.md, LICENSE $bundle
+          Compress-Archive -Path "$bundle/*" `
+            -DestinationPath "artifacts/CVXkernel-${{ env.CVX_VERSION }}-dotnet8-win.zip" -Force
+          Remove-Item -LiteralPath $bundle -Recurse
+
+          $lines = Get-ChildItem artifacts -File |
+            Where-Object Name -ne "SHA256SUMS.txt" |
+            Sort-Object Name |
+            ForEach-Object {
+              $hash = (Get-FileHash $_.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
+              "$hash  $($_.Name)"
+            }
+          $lines | Set-Content artifacts/SHA256SUMS.txt -Encoding ascii
+
+      - name: Upload workflow artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: CVXkernel-${{ env.CVX_VERSION }}-windows-sdk
+          path: artifacts/*
+          if-no-files-found: error
+
+      - name: Publish GitHub release
+        if: startsWith(github.ref, 'refs/tags/v')
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $tag = $env:GITHUB_REF_NAME
+          gh release view $tag *> $null
+          if ($LASTEXITCODE -ne 0) {
+            gh release create $tag --title "CVXkernel $tag" --generate-notes
+          }
+          gh release upload $tag artifacts/* --clobber
