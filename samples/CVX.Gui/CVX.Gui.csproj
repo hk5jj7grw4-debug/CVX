@@ -1,0 +1,15 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net8.0-windows</TargetFramework>
+    <UseWPF>true</UseWPF>
+    <ApplicationTitle>CVX GUI Sample</ApplicationTitle>
+    <RootNamespace>CVX.Gui</RootNamespace>
+    <AssemblyName>CVX.Gui</AssemblyName>
+    <IsPackable>false</IsPackable>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="..\..\CVX.Client\CVX.Client.csproj" />
+    <ProjectReference Include="..\..\CVX.Sdk.DotNet\CVX.Sdk.DotNet.csproj" />
+  </ItemGroup>
+</Project>

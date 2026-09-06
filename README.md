@@ -9,6 +9,7 @@
 | `CVX.Client` | 本地组件安装、启动注入、自动恢复与消息回调 | DLL / NuGet |
 | `CVX.Sdk.DotNet` | 消息、联系人、群等业务接口 | DLL / NuGet |
 | `CVX.Sdk.Go` | Go 业务接口 | Go 模块 |
+| `CVX.Gui` | WPF 示例客户端 | `samples/CVX.Gui` |
 
 无需独立管理进程或管理 HTTP 端口。`inject.exe`、内核 DLL 和便携微信来自组件服务，不由本仓库构建。
 
@@ -106,6 +107,7 @@ await runtime.RestartAsync();
 ```sh
 dotnet build CVX.sln -c Release
 dotnet run --project tests/CVX.Client.Tests -c Release --no-build
+dotnet run --project samples/CVX.Gui -c Release
 go -C CVX.Sdk.Go test ./...
 ```
 
