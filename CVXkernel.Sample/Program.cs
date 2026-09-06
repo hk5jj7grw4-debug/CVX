@@ -25,7 +25,7 @@ runtime.Messages.ReceiveError += (_, exception) =>
     Console.Error.WriteLine("回调处理错误: " + exception.Message);
 
 var progress = new Progress<int>(value => Console.WriteLine($"Manager 下载进度: {value}%"));
-var status = await runtime.EnsureRunningAsync(
+var status = await runtime.ConnectAsync(
     new RobotManagerConfig
     {
         UpdateServerUrl = updateServerUrl,

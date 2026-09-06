@@ -39,6 +39,8 @@ static async Task TestCallbackReceiverAsync()
     });
 
     using var http = new HttpClient();
+    using var healthResponse = await http.GetAsync(callback);
+    Equal(HttpStatusCode.OK, healthResponse.StatusCode, "回调健康检查状态");
     using var body = new StringContent("{\"type\":\"text\",\"text\":\"ping\",\"messageId\":\"1\"}", Encoding.UTF8, "application/json");
     using var response = await http.PostAsync(callback, body);
     Equal(HttpStatusCode.OK, response.StatusCode, "回调 HTTP 状态");
@@ -51,23 +53,46 @@ static async Task TestManagerClientAsync()
 {
     var handler = new StubHandler(request =>
     {
-        Equal("/v1/status", request.RequestUri?.AbsolutePath, "Manager 请求路径");
-        const string json = """
-            {
-              "ok": true,
-              "desiredState": "running",
-              "runtimeState": "ready",
-              "wechatRunning": true,
-              "gvxApiReady": true,
-              "gvxApiPort": 19088,
-              "wechatProcessIds": [123],
-              "wechatVersion": "4.0",
-              "componentVersion": "1.0",
-              "versionStatus": "supported",
-              "supportedWechatVersions": ["4.0"],
-              "lastError": null
-            }
-            """;
+        var path = request.RequestUri?.AbsolutePath;
+        var json = path switch
+        {
+            "/v1/health" => """
+                {
+                  "ok": true,
+                  "service": "Sao.WechatRobotManager",
+                  "version": "1.0.0",
+                  "protocolVersion": 2,
+                  "processId": 456
+                }
+                """,
+            "/v1/client" when request.Method == HttpMethod.Put => """
+                {
+                  "ok": true,
+                  "clientId": "test-client",
+                  "instanceId": "test-instance",
+                  "callbackReady": true
+                }
+                """,
+            "/v1/client" when request.Method == HttpMethod.Delete => "{}",
+            "/v1/status" => """
+                {
+                  "ok": true,
+                  "desiredState": "running",
+                  "runtimeState": "ready",
+                  "wechatRunning": true,
+                  "gvxApiReady": true,
+                  "gvxApiPort": 19088,
+                  "wechatProcessIds": [123],
+                  "wechatVersion": "4.0",
+                  "componentVersion": "1.0",
+                  "versionStatus": "supported",
+                  "supportedWechatVersions": ["4.0"],
+                  "httpCallbackReady": true,
+                  "lastError": null
+                }
+                """,
+            _ => throw new InvalidOperationException("未预期的 Manager 请求: " + request),
+        };
         return new HttpResponseMessage(HttpStatusCode.OK)
         {
             Content = new StringContent(json, Encoding.UTF8, "application/json"),
@@ -75,10 +100,33 @@ static async Task TestManagerClientAsync()
     });
     using var http = new HttpClient(handler);
     using var client = new RobotManagerClient(http, apiToken: "local-test-token");
+    var health = await client.GetHealthAsync();
+    Equal(2, health.ProtocolVersion, "Manager 协议版本反序列化");
+    var session = await client.RegisterClientAsync(new RobotClientRegistration(
+        "test-client",
+        "test-instance",
+        "http://127.0.0.1:5000/api/recvMsg"));
+    Equal(true, session.CallbackReady, "客户端实例注册");
     var status = await client.GetStatusAsync();
     Equal("local-test-token", handler.LastRequest?.Headers.GetValues("X-Robot-Token").Single(), "Manager 本地鉴权");
     Equal(true, status.GvxApiReady, "Manager 状态反序列化");
+    Equal(true, status.HttpCallbackReady, "回调状态反序列化");
     Equal(19088, status.GvxApiPort, "GVx 端口反序列化");
+    await client.UnregisterClientAsync("test-client", "test-instance");
+    Equal("test-client", GetQueryValue(handler.LastRequest?.RequestUri, "clientId"), "注销客户端 ID");
+    Equal("test-instance", GetQueryValue(handler.LastRequest?.RequestUri, "instanceId"), "注销客户端实例 ID");
+}
+
+static string? GetQueryValue(Uri? uri, string key)
+{
+    if (uri is null) return null;
+    foreach (var item in uri.Query.TrimStart('?').Split('&', StringSplitOptions.RemoveEmptyEntries))
+    {
+        var parts = item.Split('=', 2);
+        if (Uri.UnescapeDataString(parts[0]) == key)
+            return parts.Length == 2 ? Uri.UnescapeDataString(parts[1]) : "";
+    }
+    return null;
 }
 
 static void TestRuntimeOwnership()

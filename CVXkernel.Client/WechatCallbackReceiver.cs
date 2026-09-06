@@ -126,7 +126,17 @@ public sealed class WechatCallbackReceiver : IAsyncDisposable, IDisposable
                 var path = target is null ? null : new Uri(new Uri("http://127.0.0.1"), target).AbsolutePath;
                 var contentLength = ParseContentLength(lines);
 
-                if (method is not ("PUT" or "POST") || !string.Equals(path, _path, StringComparison.OrdinalIgnoreCase))
+                if (!string.Equals(path, _path, StringComparison.OrdinalIgnoreCase))
+                {
+                    await WriteResponseAsync(stream, 404, "{\"ok\":false}", cancellationToken);
+                    return;
+                }
+                if (method == "GET")
+                {
+                    await WriteResponseAsync(stream, 200, "{\"ok\":true}", cancellationToken);
+                    return;
+                }
+                if (method is not ("PUT" or "POST"))
                 {
                     await WriteResponseAsync(stream, 404, "{\"ok\":false}", cancellationToken);
                     return;

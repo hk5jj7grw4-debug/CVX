@@ -8,6 +8,13 @@ public interface IRobotManagerClient
     Task<RobotManagerHealth> GetHealthAsync(CancellationToken cancellationToken = default);
     Task<RobotManagerStatus> GetStatusAsync(CancellationToken cancellationToken = default);
     Task<RobotManagerOperation> GetOperationAsync(CancellationToken cancellationToken = default);
+    Task<RobotClientSession> RegisterClientAsync(
+        RobotClientRegistration registration,
+        CancellationToken cancellationToken = default);
+    Task UnregisterClientAsync(
+        string clientId,
+        string instanceId,
+        CancellationToken cancellationToken = default);
     Task ConfigureAsync(RobotManagerConfig config, CancellationToken cancellationToken = default);
     Task<RobotManagerStatus> ReconcileAsync(CancellationToken cancellationToken = default);
     Task<RobotManagerStatus> StartAsync(CancellationToken cancellationToken = default);
@@ -60,6 +67,39 @@ public sealed class RobotManagerClient : IRobotManagerClient, IDisposable
 
     public Task<RobotManagerOperation> GetOperationAsync(CancellationToken cancellationToken = default) =>
         GetAsync<RobotManagerOperation>("/v1/operation", cancellationToken);
+
+    public async Task<RobotClientSession> RegisterClientAsync(
+        RobotClientRegistration registration,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(registration);
+        if (string.IsNullOrWhiteSpace(registration.ClientId))
+            throw new ArgumentException("客户端 ID 不能为空", nameof(registration));
+        if (string.IsNullOrWhiteSpace(registration.InstanceId))
+            throw new ArgumentException("客户端实例 ID 不能为空", nameof(registration));
+        if (!Uri.TryCreate(registration.CallbackUrl, UriKind.Absolute, out var callback)
+            || callback.Scheme != Uri.UriSchemeHttp
+            || !callback.IsLoopback)
+            throw new ArgumentException("客户端回调地址必须是本机 HTTP 地址", nameof(registration));
+
+        using var response = await _http.PutAsJsonAsync("/v1/client", registration, _json, cancellationToken);
+        return await ReadAsync<RobotClientSession>(response, cancellationToken);
+    }
+
+    public async Task UnregisterClientAsync(
+        string clientId,
+        string instanceId,
+        CancellationToken cancellationToken = default)
+    {
+        if (string.IsNullOrWhiteSpace(clientId))
+            throw new ArgumentException("客户端 ID 不能为空", nameof(clientId));
+        if (string.IsNullOrWhiteSpace(instanceId))
+            throw new ArgumentException("客户端实例 ID 不能为空", nameof(instanceId));
+        var path = "/v1/client?clientId=" + Uri.EscapeDataString(clientId.Trim())
+                   + "&instanceId=" + Uri.EscapeDataString(instanceId.Trim());
+        using var response = await _http.DeleteAsync(path, cancellationToken);
+        await EnsureSuccessAsync(response, cancellationToken);
+    }
 
     public async Task ConfigureAsync(RobotManagerConfig config, CancellationToken cancellationToken = default)
     {

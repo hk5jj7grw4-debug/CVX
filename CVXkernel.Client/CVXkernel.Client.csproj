@@ -3,7 +3,7 @@
     <TargetFramework>net8.0</TargetFramework>
     <AssemblyName>CVXkernel.Client</AssemblyName>
     <RootNamespace>CVXkernel.Client</RootNamespace>
-    <Version>0.1.0</Version>
+    <Version>0.2.0</Version>
     <PackageId>CVXkernel.Client</PackageId>
     <Authors>Sao</Authors>
     <Description>Client-side lifecycle, deployment, and callback receiver for the CVXkernel integration.</Description>

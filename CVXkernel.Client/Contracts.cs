@@ -6,6 +6,7 @@ public sealed record RobotManagerHealth(
     bool Ok,
     string Service,
     string Version,
+    int ProtocolVersion,
     int ProcessId);
 
 public sealed record RobotManagerStatus(
@@ -20,7 +21,19 @@ public sealed record RobotManagerStatus(
     string? ComponentVersion,
     string VersionStatus,
     IReadOnlyList<string> SupportedWechatVersions,
+    bool HttpCallbackReady,
     string? LastError);
+
+public sealed record RobotClientRegistration(
+    string ClientId,
+    string InstanceId,
+    string CallbackUrl);
+
+public sealed record RobotClientSession(
+    bool Ok,
+    string ClientId,
+    string InstanceId,
+    bool CallbackReady);
 
 public sealed record RobotManagerOperation(
     bool Running,

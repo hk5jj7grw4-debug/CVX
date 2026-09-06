@@ -10,6 +10,9 @@ namespace CVXkernel.Client;
 
 public sealed record RobotManagerBootstrapperOptions
 {
+    public const int CurrentProtocolVersion = 2;
+    public const string ExpectedServiceName = "Sao.WechatRobotManager";
+
     public Uri ManagerApiBaseAddress { get; init; } = RobotManagerClient.DefaultBaseAddress;
     public string RootDirectory { get; init; } = Path.Combine(
         Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
@@ -18,6 +21,8 @@ public sealed record RobotManagerBootstrapperOptions
     public string DownloadToken { get; init; } = "";
     public string ApiToken { get; init; } = "";
     public string AppSlug { get; init; } = "wechat-robot-manager";
+    public string ClientId { get; init; } = Assembly.GetEntryAssembly()?.GetName().Name
+                                             ?? "cvxkernel-client";
     public string ExecutableName { get; init; } = "Sao.WechatRobotManager.exe";
     public string Channel { get; init; } = "stable";
     public string Platform { get; init; } = "windows";
@@ -25,6 +30,7 @@ public sealed record RobotManagerBootstrapperOptions
     public string ArtifactType { get; init; } = "portable";
     public TimeSpan HealthProbeTimeout { get; init; } = TimeSpan.FromSeconds(2);
     public TimeSpan ManagerStartTimeout { get; init; } = TimeSpan.FromSeconds(20);
+    public TimeSpan ClientReadyTimeout { get; init; } = TimeSpan.FromSeconds(45);
     public TimeSpan DownloadTimeout { get; init; } = TimeSpan.FromMinutes(10);
     public bool DisableDownloadProxy { get; init; } = true;
 
@@ -80,40 +86,7 @@ public sealed class RobotManagerBootstrapper : IDisposable
         await _ensureGate.WaitAsync(cancellationToken);
         try
         {
-            var health = await TryGetHealthAsync(cancellationToken);
-            var installed = FindInstalledVersion();
-            var currentVersion = health?.Version ?? installed?.Version ?? "0.0.0";
-            var token = _options.ResolveDownloadToken();
-            LatestUpdateResponse? update = null;
-
-            if (token.Length > 0)
-                update = await CheckLatestAsync(config.UpdateServerUrl, currentVersion, token, cancellationToken);
-
-            if (update?.UpdateAvailable == true)
-            {
-                if (string.IsNullOrWhiteSpace(update.Version) || update.Artifact is null)
-                    throw new InvalidOperationException("RobotManager 更新响应缺少版本或产物信息");
-                installed = await DownloadAndInstallAsync(update, token, progress, cancellationToken);
-                if (health is not null)
-                {
-                    await StopManagerHostAsync(cancellationToken);
-                    health = null;
-                }
-            }
-            else if (health is null && installed is null)
-            {
-                var reason = token.Length == 0 ? "未提供下载 Token" : "更新服务器没有返回可安装版本";
-                throw new InvalidOperationException($"RobotManager 尚未安装，且{reason}");
-            }
-
-            if (health is null)
-            {
-                installed ??= FindInstalledVersion()
-                    ?? throw new InvalidOperationException("RobotManager 尚未安装");
-                StartManager(installed.Value.Directory);
-                await WaitForHealthAsync(cancellationToken);
-            }
-
+            await EnsureManagerRunningCoreAsync(config.UpdateServerUrl, progress, cancellationToken);
             var effectiveConfig = config with { ApiToken = _options.ApiToken.Trim() };
             await _manager.ConfigureAsync(effectiveConfig, cancellationToken);
             return await _manager.ReconcileAsync(cancellationToken);
@@ -121,6 +94,105 @@ public sealed class RobotManagerBootstrapper : IDisposable
         finally
         {
             _ensureGate.Release();
+        }
+    }
+
+    internal async Task<RobotManagerStatus> ConnectClientAsync(
+        RobotManagerConfig config,
+        RobotClientRegistration registration,
+        IProgress<int>? progress,
+        CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(config);
+        ArgumentNullException.ThrowIfNull(registration);
+        await _ensureGate.WaitAsync(cancellationToken);
+        var registered = false;
+        try
+        {
+            await EnsureManagerRunningCoreAsync(config.UpdateServerUrl, progress, cancellationToken);
+            var session = await _manager.RegisterClientAsync(registration, cancellationToken);
+            if (!session.Ok
+                || !string.Equals(session.ClientId, registration.ClientId, StringComparison.Ordinal)
+                || !string.Equals(session.InstanceId, registration.InstanceId, StringComparison.Ordinal))
+                throw new InvalidOperationException("RobotManager 没有确认当前客户端实例");
+            registered = true;
+
+            var effectiveConfig = config with
+            {
+                ApiToken = _options.ApiToken.Trim(),
+                HttpCallbackUrl = registration.CallbackUrl,
+            };
+            await _manager.ConfigureAsync(effectiveConfig, cancellationToken);
+            return await _manager.ReconcileAsync(cancellationToken);
+        }
+        catch
+        {
+            if (registered)
+            {
+                using var cleanupTimeout = new CancellationTokenSource(TimeSpan.FromSeconds(2));
+                try
+                {
+                    await _manager.UnregisterClientAsync(
+                        registration.ClientId,
+                        registration.InstanceId,
+                        cleanupTimeout.Token);
+                }
+                catch
+                {
+                    // Preserve the original connect error if cleanup cannot reach the manager.
+                }
+            }
+            throw;
+        }
+        finally
+        {
+            _ensureGate.Release();
+        }
+    }
+
+    async Task EnsureManagerRunningCoreAsync(
+        string updateServerUrl,
+        IProgress<int>? progress,
+        CancellationToken cancellationToken)
+    {
+        var health = await TryGetHealthAsync(cancellationToken);
+        if (health is not null) ValidateManagerIdentity(health);
+
+        var installed = FindInstalledVersion();
+        var currentVersion = health?.Version ?? installed?.Version ?? "0.0.0";
+        var token = _options.ResolveDownloadToken();
+        LatestUpdateResponse? update = null;
+
+        if (token.Length > 0)
+            update = await CheckLatestAsync(updateServerUrl, currentVersion, token, cancellationToken);
+
+        if (update?.UpdateAvailable == true)
+        {
+            if (string.IsNullOrWhiteSpace(update.Version) || update.Artifact is null)
+                throw new InvalidOperationException("RobotManager 更新响应缺少版本或产物信息");
+            installed = await DownloadAndInstallAsync(update, token, progress, cancellationToken);
+            if (health is not null)
+            {
+                await StopManagerHostAsync(cancellationToken);
+                health = null;
+            }
+        }
+        else if (health is null && installed is null)
+        {
+            var reason = token.Length == 0 ? "未提供下载 Token" : "更新服务器没有返回可安装版本";
+            throw new InvalidOperationException($"RobotManager 尚未安装，且{reason}");
+        }
+
+        if (health is not null) ValidateManagerProtocol(health);
+
+        if (health is null)
+        {
+            installed ??= FindInstalledVersion()
+                ?? throw new InvalidOperationException("RobotManager 尚未安装");
+            StartManager(installed.Value.Directory);
+            health = await WaitForHealthAsync(cancellationToken);
+            ValidateManagerIdentity(health);
+            ValidateManagerProtocol(health);
         }
     }
 
@@ -300,15 +372,34 @@ public sealed class RobotManagerBootstrapper : IDisposable
         }) ?? throw new InvalidOperationException("RobotManager 启动失败");
     }
 
-    async Task WaitForHealthAsync(CancellationToken cancellationToken)
+    async Task<RobotManagerHealth> WaitForHealthAsync(CancellationToken cancellationToken)
     {
         var deadline = DateTimeOffset.UtcNow.Add(_options.ManagerStartTimeout);
         while (DateTimeOffset.UtcNow < deadline)
         {
             await Task.Delay(250, cancellationToken);
-            if (await TryGetHealthAsync(cancellationToken) is not null) return;
+            if (await TryGetHealthAsync(cancellationToken) is { } health) return health;
         }
         throw new TimeoutException("RobotManager 启动超时");
+    }
+
+    static void ValidateManagerIdentity(RobotManagerHealth health)
+    {
+        if (!health.Ok)
+            throw new InvalidOperationException("RobotManager 健康检查未通过");
+        if (!string.Equals(
+                health.Service,
+                RobotManagerBootstrapperOptions.ExpectedServiceName,
+                StringComparison.Ordinal))
+            throw new InvalidOperationException(
+                $"端口上的服务不是预期的 RobotManager：{health.Service}");
+    }
+
+    static void ValidateManagerProtocol(RobotManagerHealth health)
+    {
+        if (health.ProtocolVersion != RobotManagerBootstrapperOptions.CurrentProtocolVersion)
+            throw new InvalidOperationException(
+                $"RobotManager 协议版本不兼容：需要 {RobotManagerBootstrapperOptions.CurrentProtocolVersion}，实际 {health.ProtocolVersion}");
     }
 
     (string Directory, string Version)? FindInstalledVersion()
@@ -343,6 +434,10 @@ public sealed class RobotManagerBootstrapper : IDisposable
         if (string.IsNullOrWhiteSpace(options.ExecutableName)
             || Path.GetFileName(options.ExecutableName) != options.ExecutableName)
             throw new ArgumentException("Manager 可执行文件名无效", nameof(options));
+        if (options.ClientReadyTimeout <= TimeSpan.Zero)
+            throw new ArgumentOutOfRangeException(nameof(options), "客户端 Ready 超时必须大于零");
+        if (string.IsNullOrWhiteSpace(options.ClientId))
+            throw new ArgumentException("客户端 ID 不能为空", nameof(options));
     }
 
     static string NormalizeBase(string value)
