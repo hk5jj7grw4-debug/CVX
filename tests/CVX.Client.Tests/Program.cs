@@ -381,7 +381,14 @@ sealed class KernelServer : IAsyncDisposable
                 await ctx.Response.OutputStream.WriteAsync(bytes);
             }
             catch (Exception ex) when (ex is HttpListenerException or IOException or ObjectDisposedException) { }
-            finally { ctx.Response.Close(); }
+            finally
+            {
+                try { ctx.Response.Close(); }
+                catch (InvalidOperationException) when (DelayResponse || !listener.IsListening)
+                {
+                    ctx.Response.Abort();
+                }
+            }
         }
     }
     internal void Stop() { _listener?.Close(); _listener = null; }
