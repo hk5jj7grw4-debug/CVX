@@ -4,20 +4,24 @@ using System.Text.Json;
 namespace CVX.Client;
 
 internal sealed record WechatProcess(int Id, long StartedAtUtcTicks, string Executable);
-internal sealed record AppliedRuntime(WechatProcess Process, string CallbackUrl, int ApiPort, string ComponentVersion);
+internal sealed record AppliedRuntime(WechatProcess Process, string CallbackUrl, int ApiPort, string ComponentVersion, string? WechatVersion = null, WechatVersionMatch VersionMatch = WechatVersionMatch.Unknown);
 internal sealed record KernelHealth(bool IsLoggedIn);
 
 // Isolates Windows process operations so recovery can be tested without injection.
 internal interface IWechatProcessHost
 {
+    int? ListenerProcessId(int port);
     IReadOnlyList<WechatProcess> FindOwned(string componentDirectory);
     Task StopAsync(WechatProcess process, CancellationToken ct);
+    Task StopAllAsync(CancellationToken ct);
     IDisposable Start(string executable, string directory, string wechat, string dll, string config);
     int? ExitCode(IDisposable injector);
 }
 
 internal sealed class WindowsWechatProcessHost : IWechatProcessHost
 {
+    public int? ListenerProcessId(int port) => WindowsPortOwner.Find(port);
+
     public IReadOnlyList<WechatProcess> FindOwned(string componentDirectory)
     {
         if (!OperatingSystem.IsWindows()) return [];
@@ -47,6 +51,41 @@ internal sealed class WindowsWechatProcessHost : IWechatProcessHost
         var name = Path.GetFileName(path);
         return name.Equals("Weixin.exe", StringComparison.OrdinalIgnoreCase)
             || name.Equals("WeChat.exe", StringComparison.OrdinalIgnoreCase);
+    }
+
+    public async Task StopAllAsync(CancellationToken ct)
+    {
+        if (!OperatingSystem.IsWindows()) throw new PlatformNotSupportedException("关闭微信仅支持 Windows");
+        using var timeout = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        timeout.CancelAfter(TimeSpan.FromSeconds(10));
+        while (true)
+        {
+            timeout.Token.ThrowIfCancellationRequested();
+            var found = false;
+            foreach (var name in new[] { "Weixin", "WeChat", "WeixinExt", "WeixinUpdate", "WeChatAppEx" })
+            {
+                var processes = Process.GetProcessesByName(name);
+                try
+                {
+                    foreach (var process in processes)
+                    {
+                        try
+                        {
+                            if (process.HasExited) continue;
+                            found = true;
+                            var exe = process.MainModule?.FileName
+                                ?? throw new InvalidOperationException("无法识别微信进程路径，已停止修复");
+                            await StopAsync(new(process.Id, process.StartTime.ToUniversalTime().Ticks, exe), timeout.Token).ConfigureAwait(false);
+                        }
+                        catch (InvalidOperationException) when (process.HasExited) { }
+                        catch (System.ComponentModel.Win32Exception) when (process.HasExited) { }
+                    }
+                }
+                finally { foreach (var process in processes) process.Dispose(); }
+            }
+            if (!found) return;
+            await Task.Delay(100, timeout.Token).ConfigureAwait(false);
+        }
     }
 
     public async Task StopAsync(WechatProcess owned, CancellationToken ct)
@@ -87,6 +126,7 @@ internal sealed class WindowsWechatProcessHost : IWechatProcessHost
 
 internal sealed class WechatLauncher : IDisposable
 {
+    internal Action<WechatRuntimePhase, string?, string?, double?>? Report { get; set; }
     readonly WechatRobotOptions _options;
     readonly ComponentInstaller _installer;
     readonly IWechatProcessHost _processes;
@@ -98,31 +138,51 @@ internal sealed class WechatLauncher : IDisposable
     {
         _options = options;
         _installer = new(options);
+        _installer.Report = (phase, version, progress) => Report?.Invoke(phase, version, null, progress);
         _processes = processes ?? new WindowsWechatProcessHost();
     }
 
     internal async Task<WechatRobotStatus> ConnectAsync(Uri callback, bool restart, CancellationToken ct)
     {
         var owned = _processes.FindOwned(_options.ComponentDirectory);
-        if (owned.Count > 1) throw new InvalidOperationException("组件目录中有多个微信进程，无法确定要恢复的实例");
+
         KernelHealth? health;
         try { health = await ProbeAsync(ct).ConfigureAwait(false); }
-        catch (InvalidOperationException) when (restart && owned.Count == 1)
+        catch (InvalidOperationException)
         {
-            // Explicit recovery may repair a malformed API, but only for a verified managed process.
+            // Protocol/HTTP failures enter the same disk check as a timeout.
+            // Listener ownership is verified below before any process is stopped.
             health = null;
         }
+        owned = _processes.FindOwned(_options.ComponentDirectory);
         var applied = await ReadStateAsync(ct).ConfigureAwait(false);
-        if (!restart && health is not null && owned.Count == 1 && applied is not null &&
-            applied.Process == owned[0] && applied.ApiPort == _options.GvxApiPort &&
+        var listener = _processes.ListenerProcessId(_options.GvxApiPort);
+        var managed = owned.FirstOrDefault(p => p.Id == listener);
+        if (!restart && health is not null && managed is not null && applied is not null &&
+            applied.Process == managed && applied.ApiPort == _options.GvxApiPort &&
             string.Equals(applied.CallbackUrl, callback.AbsoluteUri, StringComparison.Ordinal))
-            return new(true, health.IsLoggedIn, applied.ComponentVersion, callback);
+            return new(true, health.IsLoggedIn, applied.ComponentVersion, callback)
+            {
+                DetectedWechatVersion = applied.WechatVersion,
+                VersionMatch = applied.VersionMatch
+            };
 
-        if (health is not null && owned.Count == 0)
+        var inspection = _installer.InspectVersion();
+        Report?.Invoke(WechatRuntimePhase.Checking, inspection.Version, inspection.ComponentVersion, null);
+        if (listener is not null && managed is null)
+            throw new InvalidOperationException("内核端口被非受管进程占用");
+        var repairVersion = inspection.Compatible == false;
+        if (!repairVersion && owned.Select(p => p.Executable).Distinct(StringComparer.OrdinalIgnoreCase).Count() > 1)
+            throw new InvalidOperationException("组件目录中有不同路径的微信实例，无法确定恢复目标");
+        if (health is not null && managed is null)
             throw new InvalidOperationException("内核接口已在线，但无法确认其受管微信进程；请关闭旧实例后重试");
-        // Preserve the legacy component directory, but only stop processes verified to live there.
-        foreach (var process in owned) await _processes.StopAsync(process, ct).ConfigureAwait(false);
-        if (owned.Count > 0)
+        if (repairVersion)
+        {
+            Report?.Invoke(WechatRuntimePhase.Repairing, inspection.Version, inspection.ComponentVersion, null);
+            await _processes.StopAllAsync(ct).ConfigureAwait(false);
+        }
+        else foreach (var process in owned) await _processes.StopAsync(process, ct).ConfigureAwait(false);
+        if (repairVersion || owned.Count > 0)
         {
             var deadline = DateTimeOffset.UtcNow.AddSeconds(10);
             while (await ProbeAsync(ct).ConfigureAwait(false) is not null)
@@ -135,6 +195,8 @@ internal sealed class WechatLauncher : IDisposable
         var installed = await _installer.EnsureInstalledAsync(ct).ConfigureAwait(false);
         var manifest = installed.Manifest;
         var wechat = ComponentInstaller.EnsureBundleExtracted(installed.Directory, manifest);
+        var verified = _installer.InspectVersion();
+        Report?.Invoke(WechatRuntimePhase.Connecting, verified.Version, manifest.Version, null);
         var config = manifest.LaunchArgs.DeepClone().AsObject();
         config["recivemode"] = "http";
         config["http_server_port"] = _options.GvxApiPort;
@@ -154,9 +216,10 @@ internal sealed class WechatLauncher : IDisposable
             if (health is not null)
             {
                 owned = _processes.FindOwned(_options.ComponentDirectory);
-                if (owned.Count != 1 || !string.Equals(owned[0].Executable, Path.GetFullPath(wechat), StringComparison.OrdinalIgnoreCase))
+                var injected = owned.FirstOrDefault(p => p.Id == _processes.ListenerProcessId(_options.GvxApiPort));
+                if (injected is null || !string.Equals(injected.Executable, Path.GetFullPath(wechat), StringComparison.OrdinalIgnoreCase))
                     throw new InvalidOperationException("内核响应正常，但微信进程身份与本次启动不匹配");
-                var state = new AppliedRuntime(owned[0], callback.AbsoluteUri, _options.GvxApiPort, manifest.Version);
+                var state = new AppliedRuntime(injected, callback.AbsoluteUri, _options.GvxApiPort, manifest.Version, verified.Version, verified.Version is null ? WechatVersionMatch.Unknown : WechatVersionMatch.Matching);
                 var temp = StatePath + ".tmp";
                 try
                 {
@@ -164,7 +227,7 @@ internal sealed class WechatLauncher : IDisposable
                     File.Move(temp, StatePath, overwrite: true);
                 }
                 finally { if (File.Exists(temp)) File.Delete(temp); }
-                return new(true, health.IsLoggedIn, manifest.Version, callback);
+                return new(true, health.IsLoggedIn, manifest.Version, callback) { DetectedWechatVersion = verified.Version, VersionMatch = state.VersionMatch };
             }
             await Task.Delay(250, ct).ConfigureAwait(false);
         }

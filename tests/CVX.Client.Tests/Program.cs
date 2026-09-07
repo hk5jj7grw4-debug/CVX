@@ -31,16 +31,18 @@ try
     Check(host.FindOwned(fixture.Root)[0].Executable == Path.Combine(versionRoot, "Weixin", "Weixin.exe"),
         "Injection uses the manifest launcher instead of an executable in the official version directory");
     Check(status.ApiReady && !status.IsLoggedIn && host.Starts == 1, "A logged-out kernel is ready after local injection");
+    host.Helpers = true;
     await runtime.ConnectAsync();
     Check(host.Starts == 1, "Healthy repeated connection reuses the process");
     await using (var competing = new WechatRobotRuntime(options with { CallbackUrl = $"http://127.0.0.1:{Ports.Free()}/api/recvMsg" }, host))
         await Expect<InvalidOperationException>(() => competing.ConnectAsync(), "A second runtime cannot race injection or replace the callback");
 
+    host.Helpers = false;
     await SendMessage(status.CallbackUrl);
     await Until(() => messages == 1);
     host.Crash();
     await runtime.ConnectAsync();
-    Check(host.Starts == 2, "The same runtime recovers a crashed kernel");
+    Check(host.Starts == 2 && host.StopAllCalls == 0, "A compatible crashed kernel recovers without closing all WeChat processes");
     await runtime.RestartAsync();
     Check(host.Starts == 3 && host.Stops == 1, "Manual restart stops and reinjects the managed process");
     await SendMessage(status.CallbackUrl);
@@ -48,12 +50,10 @@ try
     Check(messages == 2, "Message subscriptions survive recovery and restart");
 
     kernel.Payload = "{}";
-    await Expect<InvalidOperationException>(() => runtime.ConnectAsync(), "A listening port with an unrelated JSON response is not ready");
-    Check(host.Starts == 3 && host.Stops == 1, "Invalid responses do not trigger destructive recovery");
-    // Restart may repair an abnormal response from a verified owned process.
     host.ResetPayloadOnStart = true;
-    await runtime.RestartAsync();
-    Check(host.Starts == 4, "Explicit restart repairs malformed responses from the owned process");
+    await runtime.ConnectAsync();
+    Check(host.Starts == 4 && host.Stops == 2,
+        "Malformed responses from a verified owned listener trigger automatic recovery");
 
     host.Crash(); host.FailStart = true;
     await Expect<InvalidOperationException>(() => runtime.ConnectAsync(), "Launch failures are reported");
@@ -73,7 +73,10 @@ try
 
     await using (var reopened = new WechatRobotRuntime(options, host))
     {
-        await reopened.ConnectAsync();
+        host.Helpers = true;
+        var restored = await reopened.ConnectAsync();
+        Check(restored.DetectedWechatVersion == "4.1.8.27", "Persisted version is available after reconnect");
+        host.Helpers = false;
         Check(host.Starts == 7, "A new runtime reuses a verified persisted process and callback");
     }
     await using (var rebound = new WechatRobotRuntime(options with { CallbackUrl = $"http://127.0.0.1:{Ports.Free()}/api/recvMsg" }, host))
@@ -90,6 +93,7 @@ try
     await Expect<OperationCanceledException>(() => connection, "Disposal cancels an in-flight recovery");
     await disposal.WaitAsync(TimeSpan.FromSeconds(3));
     host.SuppressApi = false; host.Crash();
+    kernel.Payload = "{}";
     kernel.Start();
     await using (var foreign = new WechatRobotRuntime(options, host))
         await Expect<InvalidOperationException>(() => foreign.ConnectAsync(), "Online kernels without a verified owned process are not restarted");
@@ -142,6 +146,113 @@ using (var installer = new ComponentInstaller(downloadOptions))
     Check(File.ReadAllText(Path.Combine(installed.Directory, "Weixin", "Weixin.exe")) == "official launcher",
         "A missing manifest launcher is repaired rather than replaced by a nested executable");
 }
+// Exercise the background lifecycle without calling ConnectAsync again.
+using (var monitoredFixture = new Fixture())
+await using (var monitoredKernel = new KernelServer())
+{
+    var monitoredHost = new FakeProcessHost(monitoredKernel) { Helpers = true };
+    var monitored = new WechatRobotRuntime(options with { ComponentDirectory = monitoredFixture.Root,
+        GvxApiPort = monitoredKernel.Port, CallbackUrl = $"http://127.0.0.1:{Ports.Free()}/api/recvMsg" }, monitoredHost);
+    var phases = new System.Collections.Concurrent.ConcurrentQueue<WechatRuntimePhase>();
+    monitored.StatusChanged += (_, value) => phases.Enqueue(value.Phase);
+    try
+    {
+        await monitored.ConnectAsync();
+        var snapshot = JsonDocument.Parse(File.ReadAllText(Path.Combine(monitoredFixture.Root, "client-runtime.json")));
+        Check(snapshot.RootElement.GetProperty("process").GetProperty("id").GetInt32() == monitoredHost.ListenerProcessId(monitoredKernel.Port),
+            "The listener PID is persisted even when an older helper is enumerated first");
+        monitoredHost.Helpers = false;
+        var portable = Path.Combine(monitoredFixture.Root, "versions", "1.0.0", "Weixin");
+        Directory.Move(Path.Combine(portable, "4.1.8.27"), Path.Combine(portable, "4.1.9.0"));
+        phases.Clear();
+        await monitored.ConnectAsync();
+        Check(monitoredHost.Starts == 1 && monitoredHost.Stops == 0 &&
+            Directory.Exists(Path.Combine(portable, "4.1.9.0")) &&
+            !phases.Contains(WechatRuntimePhase.Checking) && !phases.Contains(WechatRuntimePhase.Repairing),
+            "Healthy communication ignores disk version changes without scanning or repairing");
+        monitoredHost.Crash();
+        monitoredHost.FailStopAll = true;
+        await Expect<InvalidOperationException>(() => monitored.ConnectAsync(), "Failure to stop all WeChat processes aborts repair");
+        Check(Directory.Exists(Path.Combine(portable, "4.1.9.0")) && monitoredHost.Starts == 1,
+            "A failed stop cannot overwrite the installed tree or inject again");
+        monitoredHost.FailStopAll = false;
+        await Until(() => monitoredHost.Starts == 2 && monitored.Status.ApiReady, 8);
+        Check(monitoredHost.StopAllCalls >= 2, "Version incompatibility closes all WeChat processes before recovery");
+        Check(monitored.Status.VersionMatch == WechatVersionMatch.Matching &&
+            phases.Contains(WechatRuntimePhase.Repairing) && !Directory.Exists(Path.Combine(portable, "4.1.9.0")),
+            "Background checks detect version drift and repair from the local archive without credentials");
+        await monitored.DisposeAsync();
+        monitoredHost.Crash();
+        await Task.Delay(3300);
+        Check(monitoredHost.Starts == 2 && monitored.Status.Phase == WechatRuntimePhase.Disposed,
+            "Disposal stops automatic recovery and publishes disposed status");
+    }
+    finally { await monitored.DisposeAsync(); }
+}
+updates.InvalidHash = false;
+using (var installer = new ComponentInstaller(downloadOptions with { ComponentToken = "component-test" }))
+{
+    var phases = new List<WechatRuntimePhase>();
+    installer.Report = (phase, _, _) => phases.Add(phase);
+    File.Delete(Path.Combine(downloadRoot, "versions", "1.0.0", "wechat.zip"));
+    var requests = updates.Requests;
+    await installer.EnsureInstalledAsync(default);
+    Check(updates.Requests == requests + 2 && phases.Contains(WechatRuntimePhase.Downloading),
+        "A missing local archive is downloaded from latest and reports progress");
+}
+await using (var slow = new KernelServer { DelayResponse = true })
+using (var launcher = new WechatLauncher(options with { GvxApiPort = slow.Port }, new FakeProcessHost(slow)))
+{
+    slow.Start();
+    var watch = System.Diagnostics.Stopwatch.StartNew();
+    Check(await launcher.ProbeAsync(default) is null && watch.Elapsed.TotalSeconds is >= 1.5 and < 3.5,
+        "An unresponsive API times out asynchronously after two seconds");
+    if (OperatingSystem.IsWindows())
+    {
+        using var tcp = new TcpListener(IPAddress.Loopback, 0);
+        tcp.Start();
+        Check(WindowsPortOwner.Find(((IPEndPoint)tcp.LocalEndpoint).Port) == Environment.ProcessId,
+            "Windows resolves the actual loopback listener PID");
+    }
+}
+using (var versionFixture = new Fixture())
+{
+    var root = Path.Combine(versionFixture.Root, "version-detection", "nested", "Weixin");
+    Directory.CreateDirectory(root);
+    var exe = Path.Combine(root, "Weixin.exe");
+    File.WriteAllText(exe, "launcher");
+    var fixedVersions = new Dictionary<string, string>();
+    string? ReadVersion(string path) => fixedVersions.GetValueOrDefault(path);
+    string Add(string name, string? version)
+    {
+        var dir = Path.Combine(root, name); Directory.CreateDirectory(dir);
+        var dll = Path.Combine(dir, "Weixin.dll");
+        if (version is not null) { File.WriteAllText(dll, "module"); fixedVersions[dll] = version; }
+        return dll;
+    }
+    fixedVersions[exe] = "4.1.8.27";
+    Add("4.1.8.27", "4.1.8.27");
+    var newer = Add("4.1.12.55", "4.1.12.55");
+    Add("4.1.99.0", null);
+    Add("9.9", "9.9.0.0");
+    Check(WechatVersionDetector.Detect(exe, ReadVersion) == "4.1.12.55",
+        "Complete runtime DLL wins over old launcher, partial update and two-part directory");
+    fixedVersions.Remove(newer);
+    Check(WechatVersionDetector.Detect(exe, ReadVersion) == "4.1.8.27",
+        "A complete older installation wins over unreadable newer candidates");
+    fixedVersions[Path.Combine(root, "4.1.8.27", "Weixin.dll")] = "4.1.10.0";
+    Check(WechatVersionDetector.Detect(exe, ReadVersion) == "4.1.10.0",
+        "With no complete candidate the DLL version wins over its directory label");
+    fixedVersions.Clear();
+    Check(WechatVersionDetector.Detect(exe, ReadVersion) == "4.1.99.0",
+        "Unreadable DLLs fall back to the highest four-part directory");
+    foreach (var dir in Directory.GetDirectories(root)) Directory.Delete(dir, true);
+    fixedVersions[exe] = "4.1.8.27";
+    Check(WechatVersionDetector.Detect(exe, ReadVersion) == "4.1.8.27" &&
+        WechatVersionDetector.Normalize(" 4.1.8.27 ") == "4.1.8.27" &&
+        WechatVersionDetector.Normalize("4.1") is null,
+        "Launcher fallback and whitelist normalization require four-part versions");
+}
 Console.WriteLine("All direct Client integration checks passed.");
 
 static void Check(bool value, string text)
@@ -155,9 +266,9 @@ static async Task Expect<T>(Func<Task> action, string text) where T : Exception
     catch (T) { Console.WriteLine("PASS: " + text); return; }
     throw new Exception("Expected " + typeof(T).Name + ": " + text);
 }
-static async Task Until(Func<bool> condition)
+static async Task Until(Func<bool> condition, int seconds = 3)
 {
-    using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(3));
+    using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(seconds));
     while (!condition()) await Task.Delay(10, timeout.Token);
 }
 static async Task SendMessage(Uri callback)
@@ -205,9 +316,19 @@ sealed class Fixture : IDisposable
 sealed class FakeProcessHost(KernelServer server) : IWechatProcessHost
 {
     WechatProcess? _owned;
-    public int Starts, Stops;
-    public bool FailStart, SuppressApi, ResetPayloadOnStart;
-    public IReadOnlyList<WechatProcess> FindOwned(string root) => _owned is null ? [] : [_owned];
+    public int Starts, Stops, StopAllCalls;
+    public bool FailStopAll;
+    public Task StopAllAsync(CancellationToken ct)
+    {
+        ct.ThrowIfCancellationRequested();
+        StopAllCalls++;
+        if (FailStopAll) throw new InvalidOperationException("test stop failure");
+        Crash(); return Task.CompletedTask;
+    }
+    public int? ListenerProcessId(int port) => server.Running ? _owned?.Id ?? 99999 : null;
+    public bool FailStart, SuppressApi, ResetPayloadOnStart, Helpers;
+    public IReadOnlyList<WechatProcess> FindOwned(string root) => _owned is null ? [] : Helpers
+        ? [new(_owned.Id + 1000, 0, _owned.Executable), _owned] : [_owned];
     public Task StopAsync(WechatProcess process, CancellationToken ct)
     {
         ct.ThrowIfCancellationRequested();
@@ -233,6 +354,7 @@ sealed class KernelServer : IAsyncDisposable
     internal int Port { get; } = Ports.Free();
     internal string Payload = ValidPayload;
     internal bool SawAuthorization;
+    internal bool DelayResponse;
     HttpListener? _listener;
     readonly List<Task> _loops = [];
     internal bool Running => _listener is not null;
@@ -251,8 +373,13 @@ sealed class KernelServer : IAsyncDisposable
             catch (Exception ex) when (ex is HttpListenerException or ObjectDisposedException) { break; }
             SawAuthorization |= ctx.Request.Headers["Authorization"] is not null;
             if (ctx.Request.Url!.AbsolutePath != "/api/check_login" || ctx.Request.HttpMethod != "POST") throw new Exception("Wrong kernel probe");
-            var bytes = Encoding.UTF8.GetBytes(Payload); ctx.Response.ContentType = "application/json"; ctx.Response.ContentLength64 = bytes.Length;
-            try { await ctx.Response.OutputStream.WriteAsync(bytes); }
+            if (DelayResponse) await Task.Delay(3000);
+            var bytes = Encoding.UTF8.GetBytes(Payload);
+            try
+            {
+                ctx.Response.ContentType = "application/json"; ctx.Response.ContentLength64 = bytes.Length;
+                await ctx.Response.OutputStream.WriteAsync(bytes);
+            }
             catch (Exception ex) when (ex is HttpListenerException or IOException or ObjectDisposedException) { }
             finally { ctx.Response.Close(); }
         }

@@ -6,7 +6,7 @@
 
 | 项目 | 职责 | 产物 |
 |---|---|---|
-| `CVX.Client` | 本地组件安装、启动注入、手动恢复与消息回调 | DLL / NuGet |
+| `CVX.Client` | 本地组件安装、启动注入、自动恢复与消息回调 | DLL / NuGet |
 | `CVX.Sdk.DotNet` | 消息、联系人、群等业务接口 | DLL / NuGet |
 | `CVX.Sdk.Go` | Go 业务接口 | Go 模块 |
 
@@ -24,11 +24,13 @@ await using var runtime = new WechatRobotRuntime(new WechatRobotOptions
 });
 runtime.MessageReceived += (_, message) => Console.WriteLine(message.Text);
 runtime.ReceiveError += (_, error) => Console.Error.WriteLine(error.Message);
+runtime.StatusChanged += (_, state) =>
+    Console.WriteLine($"{state.Phase}: 微信 {state.DetectedWechatVersion ?? "未知"} / 要求 {state.RequiredWechatVersion}, {state.Error}");
 
 var status = await runtime.ConnectAsync();
 Console.WriteLine(status.IsLoggedIn ? "已登录" : "内核就绪，等待登录");
 
-// 微信崩溃后，在当前程序中再次调用即可恢复，无需重建 Runtime 或订阅。
+// DLL 已自动监控；UI 的“重新接入”按钮也可以调用，无需重建 Runtime 或订阅。
 await runtime.ConnectAsync();
 
 // UI 的“重启微信”按钮可以调用：
@@ -37,7 +39,9 @@ await runtime.RestartAsync();
 
 `ConnectAsync` 先启动回调监听，再通过 `POST /api/check_login` 验证内核响应。正常且进程身份、端口、回调记录一致时直接复用；内核不可用时准备本地组件、启动并注入。账号尚未登录也属于内核就绪，不会因此反复重启。
 
-`RestartAsync` 明确停止组件目录内的受管微信，再重新注入。异常 API 响应可以通过此入口恢复；无法识别为受管进程的在线服务不会被停止。此操作会中断当前微信会话。
+`RestartAsync` 明确停止组件目录内的受管微信，再重新注入。受管内核的异常 API 响应也会由自动检查恢复；无法识别为受管进程的在线服务不会被停止。此操作会中断当前微信会话。
+
+首次 `ConnectAsync` 后，DLL 每 3 秒异步探测一次，单次接口请求超时 2 秒。通信失败、超时、HTTP 错误或无效协议响应都立即检查本地版本；正常通信时不扫描磁盘版本，即使磁盘已经更新也不修复。检查和恢复尚未完成时跳过定时检查，不重复排队。首次连接失败后监控仍可重试，停止监控请释放 Runtime。
 
 连接和重启按 Runtime 串行执行，并使用组件目录中的跨进程独占锁；同一组件目录只允许一个活跃回调客户端。锁随连接保留，以免其他客户端覆盖回调，释放 Runtime 后解除。
 
@@ -53,9 +57,13 @@ await runtime.RestartAsync();
 | `ConnectTimeout` | 整个连接或重启过程最多 12 分钟 |
 | `StartTimeout` | 启动注入后最多等待 30 秒 |
 
-已安装且校验通过的组件直接使用，不要求 Token，不自动检查或升级。组件缺失或损坏时使用 Bearer Token 下载，校验大小、SHA-256、清单文件及便携微信兼容版本后安装。Token 不发送到本机内核，也不写入运行状态文件。
+当前目标微信为 `4.1.8.27`。兼容性按清单 `supportedWechatVersions` 的四段版本精确白名单判断，空列表不限制。连接异常时优先检查启动器旁四段目录中的 `Weixin.dll` 固定数字版本，优先选目录与 DLL 版本一致的最高完整候选；没有完整候选时使用可读 DLL 的版本，再依次退回最高四段目录和启动器固定数字版本；确认版本不匹配则关闭所有目录中的微信主进程、扩展及更新进程（包括其他微信会话），确认退出后用校验通过的本地 ZIP 恢复；关闭失败则停止修复，不覆盖文件。版本兼容的普通故障仅处理受管微信。包缺失或损坏才请求 `updates/latest` 下载。已安装且校验通过的组件直接使用，不要求 Token，不主动同步远程版本。组件缺失或损坏时使用 Bearer Token 下载，校验大小、SHA-256、清单文件及便携微信兼容版本后安装。Token 不发送到本机内核，也不写入运行状态文件。
 
-Runtime 返回 `WechatRobotStatus`：`ApiReady`、`IsLoggedIn`、`ComponentVersion` 和实际 `CallbackUrl`。启动失败、超时或取消通过异常返回；可在同一 Runtime 上重试。
+`Status` 返回最近状态，`StatusChanged` 通知状态变化；`ConnectAsync` / `RestartAsync` 返回同一类型 `WechatRobotStatus`。包含 `ApiReady`、`IsLoggedIn`、`ComponentVersion`、`CallbackUrl`、`RequiredWechatVersion`、`DetectedWechatVersion`、`VersionMatch`、`Phase`、`CheckedAt`、`Error` 和 `DownloadProgress`（0–100，未知时为空）。`IsLoggedIn` 只有在 `ApiReady` 时有意义。
+
+检测版本来自磁盘运行时 DLL（兜底为版本目录或启动器），不代表已加载模块的运行时证明。健康复用时沿用持久化的版本信息，旧记录没有版本则返回未知；`CheckedAt` 是最近状态检查时间，不意味着重新扫描了版本。正常探测不计算 ZIP 哈希或解压。
+
+状态事件可能来自后台线程，GUI 应通过 Dispatcher / SynchronizationContext 切回 UI 线程，事件处理器不应同步等待连接或释放。主动调用失败通过异常返回，后台失败通过 `Status.Error` 展示。
 
 ## 组件目录
 
@@ -78,9 +86,9 @@ Runtime 返回 `WechatRobotStatus`：`ApiReady`、`IsLoggedIn`、`ComponentVersi
 
 ## 退出与回调
 
-使用 `DisposeAsync` / `await using` 关闭连接。退出只取消正在执行的连接并关闭回调监听，不结束微信或内核；所有业务客户端退出后不提供后台自动恢复，下次连接时再检测和恢复。
+使用 `DisposeAsync` / `await using` 关闭连接。退出会停止并等待监控、取消正在执行的连接并关闭回调监听，不结束微信或内核；所有业务客户端退出后不提供后台自动恢复，下次连接时再检测和恢复。
 
-运行记录 `client-runtime.json` 保存受管进程 PID、启动时间、可执行路径、内核端口和已应用回调地址。复用时检查这些记录；回调地址变化时通过重新注入应用。HTTP 探活和已应用记录不等于端到端消息投递确认。
+运行记录 `client-runtime.json` 保存受管进程 PID、启动时间、可执行路径、内核端口、已检查的微信版本和已应用回调地址。复用时核对端口实际监听 PID 及进程身份，辅助进程不会被当成多个实例；回调地址变化时通过重新注入应用。HTTP 探活和已应用记录不等于端到端消息投递确认。
 
 消息事件在后台线程执行，UI 更新需切回 UI 线程。HTTP 确认仅代表接收，不代表业务处理完成；不保证事件处理顺序，已派发的处理可能在释放后结束。客户端离线期间不保存或补发消息。
 

@@ -1,4 +1,3 @@
-using System.Diagnostics;
 using System.IO.Compression;
 using System.Net;
 using System.Net.Http.Headers;
@@ -11,10 +10,15 @@ internal sealed record InstalledComponent(string Directory, RobotManifest Manife
 
 internal sealed class ComponentInstaller(WechatRobotOptions options) : IDisposable
 {
+    internal const string RequiredWechatVersion = "4.1.8.27";
+    internal Action<WechatRuntimePhase, string?, double?>? Report { get; set; }
     readonly HttpClient _http = new(new SocketsHttpHandler { UseProxy = false }) { Timeout = TimeSpan.FromMinutes(10) };
     string Versions => Path.Combine(options.ComponentDirectory, "versions");
 
     internal async Task<InstalledComponent> EnsureInstalledAsync(CancellationToken ct)
+        => await Task.Run(() => EnsureCoreAsync(ct), ct).ConfigureAwait(false);
+
+    async Task<InstalledComponent> EnsureCoreAsync(CancellationToken ct)
     {
         var installed = FindInstalled();
         if (installed is not null && VerifyFiles(installed.Directory, installed.Manifest))
@@ -26,6 +30,7 @@ internal sealed class ComponentInstaller(WechatRobotOptions options) : IDisposab
             throw new InvalidOperationException("组件未安装或已损坏，请配置 ComponentToken 以下载组件");
         if (string.IsNullOrWhiteSpace(options.UpdateServerUrl))
             throw new InvalidOperationException("组件未安装或已损坏，请配置 UpdateServerUrl");
+        Report?.Invoke(WechatRuntimePhase.Downloading, null, null);
         using var request = new HttpRequestMessage(HttpMethod.Get,
             options.UpdateServerUrl.TrimEnd('/') + "/api/v1/apps/wechat-robot/updates/latest?current_version=0.0.0&channel=stable&platform=windows&arch=x64");
         request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", options.ComponentToken.Trim());
@@ -56,7 +61,15 @@ internal sealed class ComponentInstaller(WechatRobotOptions options) : IDisposab
                 EnsureSuccess(package);
                 await using var source = await package.Content.ReadAsStreamAsync(ct).ConfigureAwait(false);
                 await using var target = new FileStream(archive, FileMode.CreateNew, FileAccess.Write, FileShare.None, 81920, true);
-                await source.CopyToAsync(target, ct).ConfigureAwait(false);
+                var buffer = new byte[81920];
+                long received = 0;
+                int count;
+                while ((count = await source.ReadAsync(buffer, ct).ConfigureAwait(false)) > 0)
+                {
+                    await target.WriteAsync(buffer.AsMemory(0, count), ct).ConfigureAwait(false);
+                    received += count;
+                    Report?.Invoke(WechatRuntimePhase.Downloading, null, size > 0 ? Math.Min(100, received * 100d / size) : null);
+                }
             }
             ct.ThrowIfCancellationRequested();
             if ((size > 0 && new FileInfo(archive).Length != size) || !Hash(archive).Equals(sha.Trim(), StringComparison.OrdinalIgnoreCase))
@@ -186,14 +199,17 @@ internal sealed class ComponentInstaller(WechatRobotOptions options) : IDisposab
         return ResolveBundledWechatExe(directory, manifest) ?? BundledWechatExe(directory, manifest);
     }
 
-    static void RepairBundleIfNeeded(string directory, RobotManifest manifest)
+    void RepairBundleIfNeeded(string directory, RobotManifest manifest)
     {
+        if (ResolveBundledWechatExe(directory, manifest) is null)
+            Report?.Invoke(WechatRuntimePhase.Repairing, null, null);
         var exe = EnsureBundleExtracted(directory, manifest);
-        var version = GetWechatVersion(exe) ?? DetectBundledWechatVersion(directory, manifest);
+        var version = DetectWechatVersion(directory, manifest, exe);
         if (IsSupportedWechatVersion(version, manifest)) return;
+        Report?.Invoke(WechatRuntimePhase.Repairing, version, null);
         ExtractBundle(directory, manifest);
         exe = EnsureBundleExtracted(directory, manifest);
-        version = GetWechatVersion(exe) ?? DetectBundledWechatVersion(directory, manifest);
+        version = DetectWechatVersion(directory, manifest, exe);
         if (!IsSupportedWechatVersion(version, manifest))
             throw new InvalidOperationException($"便携微信版本 {version ?? "未知"} 与组件不兼容");
     }
@@ -207,34 +223,20 @@ internal sealed class ComponentInstaller(WechatRobotOptions options) : IDisposab
         return File.Exists(exact) ? exact : null;
     }
 
-    static string? DetectBundledWechatVersion(string directory, RobotManifest manifest)
-    {
-        var first = manifest.WechatExePath.Split('/', '\\')[0];
-        var root = SafePath(directory, first);
-        if (!Directory.Exists(root)) return null;
-        return Directory.GetDirectories(root)
-            .Select(Path.GetFileName)
-            .Where(value => Version.TryParse(value, out _))
-            .OrderByDescending(value => Version.Parse(value!))
-            .FirstOrDefault();
-    }
+    internal static string? DetectWechatVersion(string directory, RobotManifest manifest, string exe) =>
+        WechatVersionDetector.Detect(exe);
 
-    static string? GetWechatVersion(string path)
+    internal (string? Version, string? ComponentVersion, bool? Compatible) InspectVersion()
     {
-        if (!File.Exists(path)) return null;
-        try
-        {
-            var info = FileVersionInfo.GetVersionInfo(path);
-            var version = (info.FileVersion ?? info.ProductVersion)?.Trim();
-            return string.IsNullOrWhiteSpace(version) ? null : version;
-        }
-        catch { return null; }
+        var installed = FindInstalled();
+        if (installed is null) return (null, null, null);
+        var exe = BundledWechatExe(installed.Directory, installed.Manifest);
+        var version = File.Exists(exe) ? DetectWechatVersion(installed.Directory, installed.Manifest, exe) : null;
+        return (version, installed.Manifest.Version, version is null ? null : IsSupportedWechatVersion(version, installed.Manifest));
     }
 
     static bool IsSupportedWechatVersion(string? version, RobotManifest manifest) =>
-        string.IsNullOrWhiteSpace(version)
-            ? manifest.SupportedWechatVersions.Count == 0
-            : manifest.SupportedWechatVersions.Count == 0 ||
-              manifest.SupportedWechatVersions.Contains(version, StringComparer.OrdinalIgnoreCase);
-
+        manifest.SupportedWechatVersions.Count == 0 ||
+        (WechatVersionDetector.Normalize(version) is { } normalized &&
+         manifest.SupportedWechatVersions.Any(value => WechatVersionDetector.Normalize(value) == normalized));
 }

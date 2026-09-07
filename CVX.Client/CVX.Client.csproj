@@ -5,7 +5,7 @@
     <RootNamespace>CVX.Client</RootNamespace>
     <PackageId>CVX.Client</PackageId>
     <Authors>Sao</Authors>
-    <Description>Local WeChat component installation, injection, manual recovery and callbacks.</Description>
+    <Description>Local WeChat component installation, injection, automatic recovery, status monitoring and callbacks.</Description>
     <PackageTags>wechat robot lifecycle windows</PackageTags>
     <PackageRequireLicenseAcceptance>false</PackageRequireLicenseAcceptance>
     <PackageLicenseExpression>MIT</PackageLicenseExpression>
