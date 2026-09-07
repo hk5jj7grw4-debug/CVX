@@ -374,6 +374,7 @@ sealed class KernelServer : IAsyncDisposable
             SawAuthorization |= ctx.Request.Headers["Authorization"] is not null;
             if (ctx.Request.Url!.AbsolutePath != "/api/check_login" || ctx.Request.HttpMethod != "POST") throw new Exception("Wrong kernel probe");
             if (DelayResponse) await Task.Delay(3000);
+            if (!listener.IsListening) break;
             var bytes = Encoding.UTF8.GetBytes(Payload);
             try
             {
@@ -386,7 +387,8 @@ sealed class KernelServer : IAsyncDisposable
                 try { ctx.Response.Close(); }
                 catch (InvalidOperationException) when (DelayResponse || !listener.IsListening)
                 {
-                    ctx.Response.Abort();
+                    try { ctx.Response.Abort(); }
+                    catch (ObjectDisposedException) { /* Listener shutdown already released the request queue. */ }
                 }
             }
         }
