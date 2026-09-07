@@ -1,163 +1,258 @@
+using System.IO.Compression;
 using System.Net;
 using System.Net.Sockets;
+using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 using CVX.Client;
 
-await using var server = new FakeManager();
-var root = Path.Combine(Path.GetTempPath(), "cvx-client-tests-" + Guid.NewGuid().ToString("N"));
+using var fixture = new Fixture();
+await using var kernel = new KernelServer();
+var host = new FakeProcessHost(kernel);
 var options = new WechatRobotOptions
 {
-    ManagerAddress = server.Address,
-    InstallDirectory = root,
-    CallbackUrl = "http://127.0.0.1:0/api/recvMsg",
+    ComponentDirectory = fixture.Root,
+    GvxApiPort = kernel.Port,
+    CallbackUrl = $"http://127.0.0.1:{Ports.Free()}/api/recvMsg",
     ConnectTimeout = TimeSpan.FromSeconds(5),
-    // An existing Manager must not contact this deliberately unreachable update server.
-    UpdateServerUrl = "http://127.0.0.1:1",
+    StartTimeout = TimeSpan.FromSeconds(1),
 };
+var runtime = new WechatRobotRuntime(options, host);
+var messages = 0;
+runtime.MessageReceived += (_, _) => Interlocked.Increment(ref messages);
 try
 {
-    var runtime = new WechatRobotRuntime(options);
-    var received = new TaskCompletionSource<WechatCallbackMessage>(TaskCreationOptions.RunContinuationsAsynchronously);
-    runtime.MessageReceived += (_, message) => received.TrySetResult(message);
+    var status = await runtime.ConnectAsync();
+    Check(status.ApiReady && !status.IsLoggedIn && host.Starts == 1, "A logged-out kernel is ready after local injection");
     await runtime.ConnectAsync();
+    Check(host.Starts == 1, "Healthy repeated connection reuses the process");
+    await using (var competing = new WechatRobotRuntime(options with { CallbackUrl = $"http://127.0.0.1:{Ports.Free()}/api/recvMsg" }, host))
+        await Expect<InvalidOperationException>(() => competing.ConnectAsync(), "A second runtime cannot race injection or replace the callback");
+
+    await SendMessage(status.CallbackUrl);
+    await Until(() => messages == 1);
+    host.Crash();
     await runtime.ConnectAsync();
-    Check(server.Registrations == 1 && server.Starts == 1, "Repeated connect reuses the connection");
-    Check(server.Config is { } config && !config.TryGetProperty("apiToken", out _) &&
-        !config.TryGetProperty("componentToken", out _) && !config.TryGetProperty("autoStart", out _),
-        "Connection preserves omitted persistent settings");
-    using var http = new HttpClient();
-    using var response = await http.PostAsync(server.CallbackUrl, new StringContent("{\"content\":\"hello\"}", Encoding.UTF8, "application/json"));
-    response.EnsureSuccessStatusCode();
-    Check((await received.Task.WaitAsync(TimeSpan.FromSeconds(3))).Text == "hello", "Public message event works");
-    await runtime.DisposeAsync();
-    await runtime.DisposeAsync();
-    Check(server.Unregistrations == 1 && server.Stops == 0, "Dispose unregisters once without stopping robot");
+    Check(host.Starts == 2, "The same runtime recovers a crashed kernel");
+    await runtime.RestartAsync();
+    Check(host.Starts == 3 && host.Stops == 1, "Manual restart stops and reinjects the managed process");
+    await SendMessage(status.CallbackUrl);
+    await Until(() => messages == 2);
+    Check(messages == 2, "Message subscriptions survive recovery and restart");
 
-    server.Unauthorized = true;
-    await using (var denied = new WechatRobotRuntime(options))
+    kernel.Payload = "{}";
+    await Expect<InvalidOperationException>(() => runtime.ConnectAsync(), "A listening port with an unrelated JSON response is not ready");
+    Check(host.Starts == 3 && host.Stops == 1, "Invalid responses do not trigger destructive recovery");
+    // Restart may repair an abnormal response from a verified owned process.
+    host.ResetPayloadOnStart = true;
+    await runtime.RestartAsync();
+    Check(host.Starts == 4, "Explicit restart repairs malformed responses from the owned process");
+
+    host.Crash(); host.FailStart = true;
+    await Expect<InvalidOperationException>(() => runtime.ConnectAsync(), "Launch failures are reported");
+    host.FailStart = false;
+    await runtime.ConnectAsync();
+    Check(host.Starts == 5, "Retry after failure reacquires callback and ownership");
+
+    host.Crash(); host.SuppressApi = true;
+    await Expect<TimeoutException>(() => runtime.ConnectAsync(), "An injector exiting zero without an API does not count as ready");
+    host.SuppressApi = false;
+    await runtime.ConnectAsync();
+    Check(host.Starts == 7, "A timed-out launch can be recovered in the same runtime");
+    var stops = host.Stops;
+    await runtime.DisposeAsync(); await runtime.DisposeAsync();
+    Check(host.Stops == stops && kernel.Running, "Async disposal leaves the kernel running");
+    await Expect<ObjectDisposedException>(() => runtime.ConnectAsync(), "Disposed runtimes reject new work");
+
+    await using (var reopened = new WechatRobotRuntime(options, host))
     {
-        try { await denied.ConnectAsync(); throw new Exception("Expected 401"); }
-        catch (RobotManagerException ex) when (ex.StatusCode == HttpStatusCode.Unauthorized) { }
+        await reopened.ConnectAsync();
+        Check(host.Starts == 7, "A new runtime reuses a verified persisted process and callback");
     }
-    Check(server.Registrations == 1, "401 remains an authentication error");
-    server.Unauthorized = false;
-
-    server.FailStart = true;
-    await using (var retry = new WechatRobotRuntime(options))
+    await using (var rebound = new WechatRobotRuntime(options with { CallbackUrl = $"http://127.0.0.1:{Ports.Free()}/api/recvMsg" }, host))
     {
-        try { await retry.ConnectAsync(); throw new Exception("Expected start failure"); }
-        catch (RobotManagerException ex) when (ex.StatusCode == HttpStatusCode.Conflict) { }
-        Check(server.Unregistrations == 2, "Failed connection unregisters");
-        server.FailStart = false;
-        await retry.ConnectAsync();
+        await rebound.ConnectAsync();
+        Check(host.Starts == 8, "A changed callback is applied by reinjecting the managed process");
     }
-    Check(server.Unregistrations == 3, "Retry reacquires callback and ownership");
 
-    server.HoldStart = true;
-    var pending = new WechatRobotRuntime(options);
+    host.Crash(); host.SuppressApi = true;
+    var pending = new WechatRobotRuntime(options with { StartTimeout = TimeSpan.FromSeconds(30) }, host);
     var connection = pending.ConnectAsync();
-    await server.StartEntered.Task.WaitAsync(TimeSpan.FromSeconds(3));
+    await Until(() => host.Starts == 9);
     var disposal = pending.DisposeAsync().AsTask();
-    try { await connection; throw new Exception("Expected cancellation"); }
-    catch (OperationCanceledException) { }
-    server.ReleaseStart.TrySetResult();
-    await disposal.WaitAsync(TimeSpan.FromSeconds(4));
-    Check(server.Stops == 0, "Disposal cancels an in-flight connection without stopping robot");
-    Console.WriteLine("All Client integration checks passed.");
+    await Expect<OperationCanceledException>(() => connection, "Disposal cancels an in-flight recovery");
+    await disposal.WaitAsync(TimeSpan.FromSeconds(3));
+    host.SuppressApi = false; host.Crash();
+    kernel.Start();
+    await using (var foreign = new WechatRobotRuntime(options, host))
+        await Expect<InvalidOperationException>(() => foreign.ConnectAsync(), "Online kernels without a verified owned process are not restarted");
+    Check(!kernel.SawAuthorization, "Kernel requests never contain component credentials");
 }
-finally { if (Directory.Exists(root)) Directory.Delete(root, true); }
+finally { await runtime.DisposeAsync(); }
 
-static void Check(bool condition, string name)
+await using var updates = new UpdateServer(fixture.Package);
+var downloadRoot = Path.Combine(fixture.Root, "download-case");
+var downloadOptions = options with { ComponentDirectory = downloadRoot, UpdateServerUrl = updates.Address.ToString() };
+using (var installer = new ComponentInstaller(downloadOptions))
+    await Expect<InvalidOperationException>(() => installer.EnsureInstalledAsync(default), "Missing component token blocks downloads");
+Check(updates.Requests == 0, "Missing credentials are rejected before contacting the component service");
+using (var installer = new ComponentInstaller(downloadOptions with { ComponentToken = "component-test" }))
 {
-    if (!condition) throw new Exception(name);
-    Console.WriteLine("PASS: " + name);
+    var installed = await installer.EnsureInstalledAsync(default);
+    Check(installed.Manifest.Version == "1.0.0" && updates.Requests == 2 && updates.AllAuthorized,
+        "Component metadata and archive use Bearer auth and install a verified package");
 }
+updates.InvalidHash = true;
+using (var installer = new ComponentInstaller(downloadOptions with { ComponentDirectory = Path.Combine(fixture.Root, "bad-hash"), ComponentToken = "component-test" }))
+    await Expect<InvalidOperationException>(() => installer.EnsureInstalledAsync(default), "Hash mismatch rejects installation");
+using (var installer = new ComponentInstaller(downloadOptions))
+{
+    var requests = updates.Requests;
+    await installer.EnsureInstalledAsync(default);
+    Check(updates.Requests == requests, "Installed components are reused offline without a token or update check");
+}
+await Expect<InvalidOperationException>(() => Task.Run(() => ComponentInstaller.SafePath(fixture.Root, "../escape")),
+    "Manifest paths cannot escape the component directory");
+Console.WriteLine("All direct Client integration checks passed.");
 
-sealed class FakeManager : IAsyncDisposable
+static void Check(bool value, string text)
+{
+    if (!value) throw new Exception(text);
+    Console.WriteLine("PASS: " + text);
+}
+static async Task Expect<T>(Func<Task> action, string text) where T : Exception
+{
+    try { await action(); }
+    catch (T) { Console.WriteLine("PASS: " + text); return; }
+    throw new Exception("Expected " + typeof(T).Name + ": " + text);
+}
+static async Task Until(Func<bool> condition)
+{
+    using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(3));
+    while (!condition()) await Task.Delay(10, timeout.Token);
+}
+static async Task SendMessage(Uri callback)
+{
+    using var http = new HttpClient();
+    using var response = await http.PostAsync(callback, new StringContent("{\"content\":\"hello\"}", Encoding.UTF8, "application/json"));
+    response.EnsureSuccessStatusCode();
+}
+static class Ports
+{
+    internal static int Free()
+    {
+        var listener = new TcpListener(IPAddress.Loopback, 0); listener.Start();
+        var port = ((IPEndPoint)listener.LocalEndpoint).Port; listener.Stop(); return port;
+    }
+}
+sealed class Fixture : IDisposable
+{
+    internal string Root { get; } = Path.Combine(Path.GetTempPath(), "cvx-direct-" + Guid.NewGuid().ToString("N"));
+    internal byte[] Package { get; }
+    internal Fixture()
+    {
+        var directory = Path.Combine(Root, "versions", "1.0.0"); Directory.CreateDirectory(directory);
+        File.WriteAllText(Path.Combine(directory, "inject.exe"), "fake injector");
+        File.WriteAllText(Path.Combine(directory, "kernel.dll"), "fake kernel");
+        using (var zip = ZipFile.Open(Path.Combine(directory, "wechat.zip"), ZipArchiveMode.Create))
+        using (var writer = new StreamWriter(zip.CreateEntry("Weixin/4.1.0/Weixin.exe").Open())) writer.Write("fake wechat");
+        object FileRecord(string name) => new { name, sha256 = Convert.ToHexString(SHA256.HashData(File.ReadAllBytes(Path.Combine(directory, name)))) };
+        File.WriteAllText(Path.Combine(directory, "manifest.json"), JsonSerializer.Serialize(new
+        {
+            version = "1.0.0", supportedWechatVersions = new[] { "4.1.0" },
+            files = new { inject = FileRecord("inject.exe"), dll = FileRecord("kernel.dll"),
+                wechatBundle = new { name = "wechat.zip", sha256 = Convert.ToHexString(SHA256.HashData(File.ReadAllBytes(Path.Combine(directory, "wechat.zip")))), exePath = "Weixin/4.1.0/Weixin.exe" } },
+            launchArgs = new { },
+        }));
+        var archive = Path.Combine(Root, "package.zip"); ZipFile.CreateFromDirectory(directory, archive); Package = File.ReadAllBytes(archive);
+    }
+    public void Dispose() => Directory.Delete(Root, true);
+}
+sealed class FakeProcessHost(KernelServer server) : IWechatProcessHost
+{
+    WechatProcess? _owned;
+    public int Starts, Stops;
+    public bool FailStart, SuppressApi, ResetPayloadOnStart;
+    public IReadOnlyList<WechatProcess> FindOwned(string root) => _owned is null ? [] : [_owned];
+    public Task StopAsync(WechatProcess process, CancellationToken ct)
+    {
+        ct.ThrowIfCancellationRequested();
+        if (process != _owned) throw new Exception("Wrong process stopped");
+        Stops++; Crash(); return Task.CompletedTask;
+    }
+    public void Crash() { server.Stop(); _owned = null; }
+    public IDisposable Start(string executable, string directory, string wechat, string dll, string config)
+    {
+        if (FailStart) throw new InvalidOperationException("test failure");
+        using var document = JsonDocument.Parse(config);
+        if (document.RootElement.GetProperty("http_server_port").GetInt32() != server.Port) throw new Exception("Wrong launch port");
+        Starts++; _owned = new(100 + Starts, Starts, Path.GetFullPath(wechat));
+        if (ResetPayloadOnStart) server.Payload = KernelServer.ValidPayload;
+        if (!SuppressApi) server.Start();
+        return new MemoryStream();
+    }
+    public int? ExitCode(IDisposable injector) => 0;
+}
+sealed class KernelServer : IAsyncDisposable
+{
+    internal const string ValidPayload = "{\"errCode\":1,\"data\":{\"status\":false}}";
+    internal int Port { get; } = Ports.Free();
+    internal string Payload = ValidPayload;
+    internal bool SawAuthorization;
+    HttpListener? _listener;
+    readonly List<Task> _loops = [];
+    internal bool Running => _listener is not null;
+    internal void Start()
+    {
+        if (_listener is not null) return;
+        var listener = new HttpListener(); listener.Prefixes.Add($"http://127.0.0.1:{Port}/"); listener.Start();
+        _listener = listener; _loops.Add(RunAsync(listener));
+    }
+    async Task RunAsync(HttpListener listener)
+    {
+        while (listener.IsListening)
+        {
+            HttpListenerContext ctx;
+            try { ctx = await listener.GetContextAsync(); }
+            catch (Exception ex) when (ex is HttpListenerException or ObjectDisposedException) { break; }
+            SawAuthorization |= ctx.Request.Headers["Authorization"] is not null;
+            if (ctx.Request.Url!.AbsolutePath != "/api/check_login" || ctx.Request.HttpMethod != "POST") throw new Exception("Wrong kernel probe");
+            var bytes = Encoding.UTF8.GetBytes(Payload); ctx.Response.ContentType = "application/json"; ctx.Response.ContentLength64 = bytes.Length;
+            try { await ctx.Response.OutputStream.WriteAsync(bytes); }
+            catch (Exception ex) when (ex is HttpListenerException or IOException or ObjectDisposedException) { }
+            finally { ctx.Response.Close(); }
+        }
+    }
+    internal void Stop() { _listener?.Close(); _listener = null; }
+    public async ValueTask DisposeAsync() { Stop(); await Task.WhenAll(_loops); }
+}
+sealed class UpdateServer : IAsyncDisposable
 {
     readonly HttpListener _listener = new();
     readonly Task _loop;
-    public Uri Address { get; }
-    public int Registrations, Unregistrations, Starts, Stops;
-    public bool Unauthorized, FailStart, HoldStart;
-    public string CallbackUrl = "";
-    public JsonElement? Config;
-    public TaskCompletionSource StartEntered = new(TaskCreationOptions.RunContinuationsAsynchronously);
-    public TaskCompletionSource ReleaseStart = new(TaskCreationOptions.RunContinuationsAsynchronously);
-
-    public FakeManager()
+    readonly byte[] _package;
+    internal Uri Address { get; } = new($"http://127.0.0.1:{Ports.Free()}/");
+    internal int Requests;
+    internal bool AllAuthorized = true, InvalidHash;
+    internal UpdateServer(byte[] package)
     {
-        var port = new TcpListener(IPAddress.Loopback, 0);
-        port.Start();
-        Address = new Uri($"http://127.0.0.1:{((IPEndPoint)port.LocalEndpoint).Port}/");
-        port.Stop();
-        _listener.Prefixes.Add(Address.ToString());
-        _listener.Start();
-        _loop = RunAsync();
+        _package = package; _listener.Prefixes.Add(Address.ToString()); _listener.Start(); _loop = RunAsync();
     }
-
     async Task RunAsync()
     {
         while (_listener.IsListening)
         {
-            HttpListenerContext context;
-            try { context = await _listener.GetContextAsync(); }
+            HttpListenerContext ctx;
+            try { ctx = await _listener.GetContextAsync(); }
             catch (Exception ex) when (ex is HttpListenerException or ObjectDisposedException) { break; }
-            await HandleAsync(context);
+            Requests++; AllAuthorized &= ctx.Request.Headers["Authorization"] == "Bearer component-test";
+            var bytes = ctx.Request.Url!.AbsolutePath == "/package.zip" ? _package : JsonSerializer.SerializeToUtf8Bytes(new
+            {
+                version = "1.0.0", artifact = new { download_url = new Uri(Address, "package.zip").ToString(), size = _package.Length,
+                    sha256 = InvalidHash ? "bad-hash" : Convert.ToHexString(SHA256.HashData(_package)) },
+            });
+            ctx.Response.ContentLength64 = bytes.Length; await ctx.Response.OutputStream.WriteAsync(bytes); ctx.Response.Close();
         }
     }
-
-    async Task HandleAsync(HttpListenerContext ctx)
-    {
-        if (ctx.Request.Headers["X-Robot-Token"] is not null || ctx.Request.Headers["Authorization"] is not null)
-            throw new Exception("Client must not send authentication headers");
-        object body = new { ok = true };
-        if (Unauthorized) ctx.Response.StatusCode = 401;
-        else switch (ctx.Request.Url!.AbsolutePath)
-        {
-            case "/v1/health":
-                body = new { ok = true, service = "CVX.Manager", version = "0.2.0", protocolVersion = 2, processId = 123 };
-                break;
-            case "/v1/client" when ctx.Request.HttpMethod == "PUT":
-                Registrations++;
-                using (var doc = await JsonDocument.ParseAsync(ctx.Request.InputStream))
-                {
-                    var r = doc.RootElement;
-                    CallbackUrl = r.GetProperty("callbackUrl").GetString()!;
-                    body = new { ok = true, clientId = r.GetProperty("clientId").GetString(), instanceId = r.GetProperty("instanceId").GetString(), callbackReady = true };
-                }
-                break;
-            case "/v1/client": Unregistrations++; break;
-            case "/v1/config":
-                using (var doc = await JsonDocument.ParseAsync(ctx.Request.InputStream)) Config = doc.RootElement.Clone();
-                break;
-            case "/v1/start":
-                Starts++;
-                if (HoldStart) { StartEntered.TrySetResult(); await ReleaseStart.Task; }
-                if (FailStart) { ctx.Response.StatusCode = 409; break; }
-                goto case "/v1/status";
-            case "/v1/status":
-                body = new { ok = true, wechatRunning = true, gvxApiReady = true, httpCallbackReady = true, runtimeState = "online" };
-                break;
-            case "/v1/stop": case "/v1/host/shutdown": Stops++; break;
-            default: throw new Exception("Unexpected request: " + ctx.Request.Url);
-        }
-        try
-        {
-            var bytes = JsonSerializer.SerializeToUtf8Bytes(body);
-            ctx.Response.ContentType = "application/json";
-            ctx.Response.ContentLength64 = bytes.Length;
-            await ctx.Response.OutputStream.WriteAsync(bytes);
-        }
-        catch (HttpListenerException) { /* The cancellation check intentionally disconnects. */ }
-        finally { ctx.Response.Close(); }
-    }
-
-    public async ValueTask DisposeAsync()
-    {
-        ReleaseStart.TrySetResult();
-        _listener.Close();
-        await _loop;
-    }
+    public async ValueTask DisposeAsync() { _listener.Close(); await _loop; }
 }

@@ -6,7 +6,6 @@
     <GenerateDocumentationFile>true</GenerateDocumentationFile>
     <NoWarn>$(NoWarn);1591</NoWarn>
     <PackageId>CVX.Sdk.DotNet</PackageId>
-    <Version>0.1.5</Version>
     <Authors>Sao</Authors>
     <Description>Managed .NET client for the local gVx WeChat middleware HTTP API, distributed as part of CVX.</Description>
     <PackageTags>cvx;wechat;sdk;windows</PackageTags>

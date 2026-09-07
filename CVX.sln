@@ -7,7 +7,9 @@ Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "CVX.Client", "CVX.Client\CV
 EndProject
 Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "CVX.Sdk.DotNet", "CVX.Sdk.DotNet\CVX.Sdk.DotNet.csproj", "{CE00B1BF-E1E4-49A8-83BE-651752D122BA}"
 EndProject
-Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "CVX.Manager", "CVX.Manager\CVX.Manager.csproj", "{CD42567D-0EB1-4A31-ADFD-0883C399DB80}"
+Project("{2150E333-8FDC-42A3-9474-1A3956D46DE8}") = "tests", "tests", "{8F0CDB00-6C8D-4559-AEA0-D6D05AC7F4CA}"
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "CVX.Client.Tests", "tests\CVX.Client.Tests\CVX.Client.Tests.csproj", "{C3EA889F-52F3-4B7C-B799-680FF2C6DE09}"
 EndProject
 Global
 	GlobalSection(SolutionConfigurationPlatforms) = preSolution
@@ -23,9 +25,12 @@ Global
 		{CE00B1BF-E1E4-49A8-83BE-651752D122BA}.Debug|Any CPU.Build.0 = Debug|Any CPU
 		{CE00B1BF-E1E4-49A8-83BE-651752D122BA}.Release|Any CPU.ActiveCfg = Release|Any CPU
 		{CE00B1BF-E1E4-49A8-83BE-651752D122BA}.Release|Any CPU.Build.0 = Release|Any CPU
-		{CD42567D-0EB1-4A31-ADFD-0883C399DB80}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
-		{CD42567D-0EB1-4A31-ADFD-0883C399DB80}.Debug|Any CPU.Build.0 = Debug|Any CPU
-		{CD42567D-0EB1-4A31-ADFD-0883C399DB80}.Release|Any CPU.ActiveCfg = Release|Any CPU
-		{CD42567D-0EB1-4A31-ADFD-0883C399DB80}.Release|Any CPU.Build.0 = Release|Any CPU
+		{C3EA889F-52F3-4B7C-B799-680FF2C6DE09}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{C3EA889F-52F3-4B7C-B799-680FF2C6DE09}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{C3EA889F-52F3-4B7C-B799-680FF2C6DE09}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{C3EA889F-52F3-4B7C-B799-680FF2C6DE09}.Release|Any CPU.Build.0 = Release|Any CPU
+	EndGlobalSection
+	GlobalSection(NestedProjects) = preSolution
+		{C3EA889F-52F3-4B7C-B799-680FF2C6DE09} = {8F0CDB00-6C8D-4559-AEA0-D6D05AC7F4CA}
 	EndGlobalSection
 EndGlobal

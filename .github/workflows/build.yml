@@ -37,7 +37,9 @@ jobs:
         id: package-version
         shell: pwsh
         run: |
-          $version = "0.1.0"
+          $baseVersion = dotnet msbuild CVX.Client/CVX.Client.csproj -getProperty:Version
+          if ($LASTEXITCODE -ne 0) { throw "Cannot read the shared project version." }
+          $version = "$($baseVersion.Trim())-ci.$env:GITHUB_RUN_NUMBER.$env:GITHUB_RUN_ATTEMPT"
           if ($env:GITHUB_REF_TYPE -eq "tag") {
             if ($env:GITHUB_REF_NAME -notmatch '^v(?<version>\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?)$') {
               throw "Release tag must match v<major>.<minor>.<patch>[-prerelease]."
@@ -48,13 +50,13 @@ jobs:
           "version=$version" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
 
       - name: Restore .NET projects
-        run: dotnet restore CVX.sln
+        run: dotnet restore CVX.sln -p:Version=${{ env.CVX_VERSION }}
 
       - name: Build .NET projects
-        run: dotnet build CVX.sln -c Release --no-restore
+        run: dotnet build CVX.sln -c Release --no-restore -p:Version=${{ env.CVX_VERSION }}
 
       - name: Run Client integration checks
-        run: dotnet run --project tests/CVX.Client.Tests -c Release
+        run: dotnet run --project tests/CVX.Client.Tests -c Release --no-build
 
       - name: Run Go tests
         working-directory: CVX.Sdk.Go
@@ -64,13 +66,12 @@ jobs:
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Path artifacts -Force | Out-Null
-          dotnet pack CVX.Client/CVX.Client.csproj `
-            -c Release -o artifacts `
-            -p:Version=${{ env.CVX_VERSION }} `
-            -p:IncludeSymbols=true -p:SymbolPackageFormat=snupkg
-          dotnet pack CVX.Sdk.DotNet/CVX.Sdk.DotNet.csproj `
-            -c Release --no-build -o artifacts `
-            -p:IncludeSymbols=true -p:SymbolPackageFormat=snupkg
+          foreach ($project in @("CVX.Client/CVX.Client.csproj", "CVX.Sdk.DotNet/CVX.Sdk.DotNet.csproj")) {
+            dotnet pack $project -c Release --no-build -o artifacts `
+              -p:Version=${{ env.CVX_VERSION }} `
+              -p:IncludeSymbols=true -p:SymbolPackageFormat=snupkg
+            if ($LASTEXITCODE -ne 0) { throw "Packing $project failed." }
+          }
 
       - name: Create DLL bundle and checksums
         shell: pwsh
@@ -111,7 +112,10 @@ jobs:
           $tag = $env:GITHUB_REF_NAME
           gh release view $tag *> $null
           if ($LASTEXITCODE -ne 0) {
-            gh release create $tag --title "CVX $tag" --generate-notes
+            $releaseArgs = @("release", "create", $tag, "--title", "CVX $tag", "--generate-notes")
+            if ($env:CVX_VERSION.Contains("-")) { $releaseArgs += "--prerelease" }
+            gh @releaseArgs
+            if ($LASTEXITCODE -ne 0) { throw "Creating release failed." }
           }
           gh release upload $tag artifacts/* --clobber
 

@@ -1,10 +1,10 @@
 using System.Text.Json.Nodes;
 
-namespace CVX.Manager;
+namespace CVX.Client;
 
-public sealed record RobotFile(string Name, string Sha256);
+internal sealed record RobotFile(string Name, string Sha256);
 
-public sealed record RobotManifest(
+internal sealed record RobotManifest(
     string Version,
     IReadOnlyList<string> SupportedWechatVersions,
     RobotFile Inject,

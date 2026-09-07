@@ -2,87 +2,86 @@
 
 > 此为私人项目依赖包，无实际内核程序，请勿下载使用。
 
-## 子项目
+## 项目
 
-| 项目 | 职责 |
-|---|---|
-| `CVX.Manager` | 常驻管理器，负责下载、启动、注入与运行状态管理 |
-| `CVX.Client` | 提供给 UI 客户端的 Manager 连接、启动和恢复能力 |
-| `CVX.Sdk.DotNet` | .NET 机器人业务 SDK |
-| `CVX.Sdk.Go` | Go 机器人业务 SDK |
+| 项目 | 职责 | 产物 |
+|---|---|---|
+| `CVX.Client` | 本地组件安装、启动注入、手动恢复与消息回调 | DLL / NuGet |
+| `CVX.Sdk.DotNet` | 消息、联系人、群等业务接口 | DLL / NuGet |
+| `CVX.Sdk.Go` | Go 业务接口 | Go 模块 |
 
-| SDK 方法 | Robot Manager 接口 |
-|---|---|
-| `GetHealthAsync` | `GET /v1/health` |
-| `GetStatusAsync` | `GET /v1/status` |
-| `GetOperationAsync` | `GET /v1/operation` |
-| `RegisterClientAsync` | `PUT /v1/client` |
-| `UnregisterClientAsync` | `DELETE /v1/client` |
-| `ConfigureAsync` | `PUT /v1/config` |
-| `ReconcileAsync` | `POST /v1/reconcile` |
-| `StartAsync` | `POST /v1/start` |
-| `StopAsync` | `POST /v1/stop` |
-| `RestartAsync` | `POST /v1/restart` |
-| `RepairAsync` | `POST /v1/repair` |
-| `ShutdownHostAsync` | `POST /v1/host/shutdown` |
+无需独立管理进程或管理 HTTP 端口。`inject.exe`、内核 DLL 和便携微信来自组件服务，不由本仓库构建。
 
-## 标准接入流程
-
-业务客户端通过一个 Runtime 连接并接收消息：
+## 接入与恢复
 
 ```csharp
 using CVX.Client;
 
 await using var runtime = new WechatRobotRuntime(new WechatRobotOptions
 {
-    // Manager 已安装并配置好时，可直接使用默认选项。
-    // 首次安装时提供以下参数：
-    UpdateServerUrl = "https://your-update-server.example",
+    UpdateServerUrl = "https://your-component-server.example",
+    ComponentToken = "component-download-token",
 });
 runtime.MessageReceived += (_, message) => Console.WriteLine(message.Text);
 runtime.ReceiveError += (_, error) => Console.Error.WriteLine(error.Message);
+
+var status = await runtime.ConnectAsync();
+Console.WriteLine(status.IsLoggedIn ? "已登录" : "内核就绪，等待登录");
+
+// 微信崩溃后，在当前程序中再次调用即可恢复，无需重建 Runtime 或订阅。
 await runtime.ConnectAsync();
+
+// UI 的“重启微信”按钮可以调用：
+await runtime.RestartAsync();
 ```
 
-`ConnectAsync` 负责启动回调监听、确保 Manager 可连接、校验服务身份与协议、注册当前实例、应用回调地址并等待机器人就绪。已有兼容 Manager 会直接复用，不检查或执行升级。重复连接会查询状态，就绪时直接返回；不会启动后台自动重连，Manager 重启后可再次调用 `ConnectAsync` 注册。
+`ConnectAsync` 先启动回调监听，再通过 `POST /api/check_login` 验证内核响应。正常且进程身份、端口、回调记录一致时直接复用；内核不可用时准备本地组件、启动并注入。账号尚未登录也属于内核就绪，不会因此反复重启。
 
-`WechatRobotOptions` 是普通接入的唯一配置入口：`ManagerAddress` 用于连接，`CallbackUrl` 用于监听，`ClientId` 标识应用，`InstallDirectory` 指定 Manager 安装目录。`ConnectTimeout` 限制整个连接过程，默认 12 分钟（含首次下载）。未提供的更新地址保留 Manager 原配置；连接不会修改组件 Token、业务端口或自动启动策略。
+`RestartAsync` 明确停止组件目录内的受管微信，再重新注入。异常 API 响应可以通过此入口恢复；无法识别为受管进程的在线服务不会被停止。此操作会中断当前微信会话。
 
-使用 `await using` 异步释放。释放会取消正在进行的连接，限时注销本次实例并关闭监听，不会停止 Manager 或微信。消息事件在后台线程执行，UI 更新需要自行切回 UI 线程；HTTP 确认仅代表接收，不代表业务处理完成。当前消息分发不保证顺序，已经派发的处理可能在释放后结束。
+连接和重启按 Runtime 串行执行，并使用组件目录中的跨进程独占锁；同一组件目录只允许一个活跃回调客户端。锁随连接保留，以免其他客户端覆盖回调，释放 Runtime 后解除。
 
-管理界面按需单独使用 `RobotManagerClient` 调用启动、停止、重启、修复等接口；Runtime 不重复暴露这些方法。
+## 配置
 
-### Token 配置
+| 选项 | 默认值 / 用途 |
+|---|---|
+| `UpdateServerUrl` | 组件服务地址，首次安装或修复损坏文件时需要 |
+| `ComponentToken` | 仅用于组件版本查询和安装包下载 |
+| `ComponentDirectory` | `%LOCALAPPDATA%\Sao\WechatRobot`，兼容原组件目录 |
+| `GvxApiPort` | `19088` |
+| `CallbackUrl` | `http://127.0.0.1:5000/api/recvMsg`，仅本机 HTTP |
+| `ConnectTimeout` | 整个连接或重启过程最多 12 分钟 |
+| `StartTimeout` | 启动注入后最多等待 30 秒 |
 
-Client 连接本机 Manager、查询 Manager 版本及下载 Manager 安装包均不需要 Token。Manager 的版本查询和安装包地址必须允许匿名访问。
+已安装且校验通过的组件直接使用，不要求 Token，不自动检查或升级。组件缺失或损坏时使用 Bearer Token 下载，校验大小、SHA-256、清单文件及便携微信兼容版本后安装。Token 不发送到本机内核，也不写入运行状态文件。
 
-仅 Manager 检查、下载机器人组件时使用 `ComponentToken`，在 Manager 的 `appsettings.json` 的 `RobotManager` 节中配置，或通过 `PUT /v1/config` 设置 `componentToken`。普通 Runtime 不接收也不覆盖它。未配置时不能从组件服务检查或下载组件，但已安装可用组件仍可启动。
+Runtime 返回 `WechatRobotStatus`：`ApiReady`、`IsLoggedIn`、`ComponentVersion` 和实际 `CallbackUrl`。启动失败、超时或取消通过异常返回；可在同一 Runtime 上重试。
 
-Manager 仅允许监听本机回环地址；旧配置中的 `apiToken` 不再生效。此调整针对 Client / Manager，不修改独立业务 SDK 的内核协议。
+## 退出与回调
 
-### 接口迁移
+使用 `DisposeAsync` / `await using` 关闭连接。退出只取消正在执行的连接并关闭回调监听，不结束微信或内核；所有业务客户端退出后不提供后台自动恢复，下次连接时再检测和恢复。
 
-这是一次不兼容的公开接口收紧：
+运行记录 `client-runtime.json` 保存受管进程 PID、启动时间、可执行路径、内核端口和已应用回调地址。复用时检查这些记录；回调地址变化时通过重新注入应用。HTTP 探活和已应用记录不等于端到端消息投递确认。
 
-- `RobotManagerBootstrapperOptions` 改为 `WechatRobotOptions`：`ManagerApiBaseAddress` → `ManagerAddress`，`RootDirectory` → `InstallDirectory`。
-- `ConnectAsync(config, callbackOptions)` 改为 `ConnectAsync(cancellationToken)`；更新地址和回调地址移到构造选项。
-- `runtime.Messages.MessageReceived` / `ReceiveError` 改为 `runtime.MessageReceived` / `ReceiveError`。
-- 删除 Runtime 的 `EnsureRunningAsync`、`Manager`、同步 `Dispose`；使用 `ConnectAsync`、独立 `RobotManagerClient` 和 `DisposeAsync`。
-- Bootstrapper、回调监听器及解析器转为内部实现。消息发送仍使用 `CVX.Sdk`。
-- 移除未使用的 `IRobotManagerClient`，管理调用直接使用 `RobotManagerClient`。
+消息事件在后台线程执行，UI 更新需切回 UI 线程。HTTP 确认仅代表接收，不代表业务处理完成；不保证事件处理顺序，已派发的处理可能在释放后结束。客户端离线期间不保存或补发消息。
 
-验证客户端连接流程：
+## 从独立 Manager 迁移
+
+- 部署新版前退出旧 Manager，并停止外部配置的旧 Manager 自启动，避免它和 Client 同时管理微信。
+- 删除 `ManagerAddress`、`ClientId` 及 Manager 本体下载配置；使用 `ComponentDirectory` 指向原组件数据目录，而非 Manager EXE 安装目录。
+- `RobotManagerClient` 及其协议模型已删除；普通恢复用 `ConnectAsync`，明确重启用 `RestartAsync`。
+- 未显式设置组件服务地址或 Token 时，可从组件目录的旧 `manager-settings.json` 读取这两个字段。旧 API Token、自动启动及期望状态均不使用。
+- 旧组件目录继续复用。旧运行实例没有新的进程/回调记录，首次连接会重新注入一次，建立可验证的记录。
+- 原来配置过非默认内核端口或回调地址的调用方，需要在新选项中明确设置。
+
+## 构建与验证
 
 ```sh
-dotnet run --project tests/CVX.Client.Tests -c Release
+dotnet build CVX.sln -c Release
+dotnet run --project tests/CVX.Client.Tests -c Release --no-build
+go -C CVX.Sdk.Go test ./...
 ```
 
-当前 SDK 协议版本为 `2`。配套 Manager 必须：
+Client 检查使用本地 HTTP 服务和模拟进程宿主，覆盖恢复、重启、回调及组件下载。真实 `inject.exe` 和微信进程生命周期需要在 Windows 上验证。
 
-- 在 `GET /v1/health` 返回 `service: "CVX.Manager"` 和 `protocolVersion: 2`；
-- 实现 `PUT /v1/client`，按 `clientId + instanceId` 注册或替换回调；
-- 实现 `DELETE /v1/client`，仅在实例 ID 匹配时注销回调；
-- 在状态响应中返回 `httpCallbackReady`；
-- 使用 `GET` 请求回调地址完成可达性检查。
-
-本协议不保存或补发客户端离线期间的消息。
+发布版本统一在 `Directory.Build.props` 设置本地默认值。CI 的普通构建使用 `<默认版本>-ci.<运行编号>.<重试次数>`；`vX.Y.Z` 或 `vX.Y.Z-prerelease` 标签构建使用标签去掉 `v` 后的版本。恢复、编译及两个 NuGet 包共用该版本，打包不重复编译；预发布标签创建预发布 GitHub Release。只有标签构建执行远端发布。

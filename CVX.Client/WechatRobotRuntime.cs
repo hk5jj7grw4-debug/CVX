@@ -1,94 +1,68 @@
+using System.Text.Json;
+
 namespace CVX.Client;
 
-/// <summary>Connection settings. Existing Manager settings are preserved when optional values are omitted.</summary>
+/// <summary>Local kernel connection and component installation settings.</summary>
 public sealed record WechatRobotOptions
 {
-    public Uri ManagerAddress { get; init; } = RobotManagerClient.DefaultBaseAddress;
     public string? UpdateServerUrl { get; init; }
-    public string ClientId { get; init; } = System.Reflection.Assembly.GetEntryAssembly()?.GetName().Name ?? "cvx-client";
-    public string InstallDirectory { get; init; } = Path.Combine(
-        Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "Sao", "WechatRobotManagerHost");
+    public string? ComponentToken { get; init; }
+    public string ComponentDirectory { get; init; } = Path.Combine(
+        Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "Sao", "WechatRobot");
+    public int GvxApiPort { get; init; } = 19088;
     public string CallbackUrl { get; init; } = WechatCallbackReceiver.DefaultCallbackUrl;
     public TimeSpan ConnectTimeout { get; init; } = TimeSpan.FromMinutes(12);
+    public TimeSpan StartTimeout { get; init; } = TimeSpan.FromSeconds(30);
 }
 
-/// <summary>Owns one callback connection. Disposal leaves Manager and WeChat running.</summary>
+/// <summary>Connects or recovers the kernel in-process. Disposal leaves WeChat running.</summary>
 public sealed class WechatRobotRuntime : IAsyncDisposable
 {
     readonly WechatRobotOptions _options;
-    readonly RobotManagerBootstrapper _bootstrapper;
+    readonly WechatLauncher _launcher;
     readonly WechatCallbackReceiver _receiver = new();
     readonly SemaphoreSlim _lifecycleGate = new(1, 1);
     readonly CancellationTokenSource _lifetime = new();
     readonly object _disposeGate = new();
-    readonly string _instanceId = Guid.NewGuid().ToString("N");
     RuntimeOwnershipLease? _ownershipLease;
     Task? _disposeTask;
-    bool _registered;
-    bool _connected;
-    bool _disposed;
 
-    public WechatRobotRuntime(WechatRobotOptions? options = null)
+    public WechatRobotRuntime(WechatRobotOptions? options = null) : this(options ?? new(), null) { }
+
+    internal WechatRobotRuntime(WechatRobotOptions options, IWechatProcessHost? processes)
     {
-        _options = options ?? new();
-        if (_options.ConnectTimeout <= TimeSpan.Zero || _options.ConnectTimeout.TotalMilliseconds > uint.MaxValue - 1)
-            throw new ArgumentOutOfRangeException(nameof(options), "连接超时必须为有效的正时间间隔");
-        if (_options.UpdateServerUrl is not null &&
-            (!Uri.TryCreate(_options.UpdateServerUrl, UriKind.Absolute, out var updateUri) ||
-             updateUri.Scheme is not ("http" or "https")))
-            throw new ArgumentException("更新地址必须是 HTTP 或 HTTPS URL", nameof(options));
-        if (!_options.ManagerAddress.IsAbsoluteUri)
-            throw new ArgumentException("Manager API 地址必须是绝对 URL", nameof(options));
-        if (string.IsNullOrWhiteSpace(_options.InstallDirectory))
-            throw new ArgumentException("Manager 安装目录不能为空", nameof(options));
-        if (string.IsNullOrWhiteSpace(_options.ClientId))
-            throw new ArgumentException("客户端 ID 不能为空", nameof(options));
-        _bootstrapper = new(_options);
-        _receiver.MessageReceived += (_, message) => MessageReceived?.Invoke(this, message);
-        _receiver.ReceiveError += (_, error) => ReceiveError?.Invoke(this, error);
+        _options = ResolveOptions(options);
+        _launcher = new(_options, processes);
+        _receiver.MessageReceived += (_, message) => Publish(MessageReceived, message);
+        _receiver.ReceiveError += (_, error) => PublishError(error);
     }
 
     public event EventHandler<WechatCallbackMessage>? MessageReceived;
     public event EventHandler<Exception>? ReceiveError;
 
-    public async Task<RobotManagerStatus> ConnectAsync(CancellationToken cancellationToken = default)
+    /// <summary>Reuses a healthy kernel or reinstalls missing components and launches it. Safe to retry after failure.</summary>
+    public Task<WechatRobotStatus> ConnectAsync(CancellationToken cancellationToken = default) =>
+        RunAsync(restart: false, cancellationToken);
+
+    /// <summary>Stops only the managed WeChat process and injects again, retaining message subscriptions.</summary>
+    public Task<WechatRobotStatus> RestartAsync(CancellationToken cancellationToken = default) =>
+        RunAsync(restart: true, cancellationToken);
+
+    async Task<WechatRobotStatus> RunAsync(bool restart, CancellationToken cancellationToken)
     {
+        lock (_disposeGate) ObjectDisposedException.ThrowIf(_disposeTask is not null, this);
         using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, _lifetime.Token);
         timeout.CancelAfter(_options.ConnectTimeout);
         var ct = timeout.Token;
         await _lifecycleGate.WaitAsync(ct).ConfigureAwait(false);
         try
         {
-            ObjectDisposedException.ThrowIf(_disposed, this);
-            if (_connected)
-            {
-                var current = await _bootstrapper.Client.GetStatusAsync(ct).ConfigureAwait(false);
-                if (IsReady(current)) return current;
-            }
-            _connected = false;
+            ct.ThrowIfCancellationRequested();
             try
             {
-                _ownershipLease ??= RuntimeOwnershipLease.Acquire(Path.Combine(_options.InstallDirectory, ".runtime-owner.lock"));
+                _ownershipLease ??= RuntimeOwnershipLease.Acquire(Path.Combine(_options.ComponentDirectory, ".runtime-owner.lock"));
                 var callback = _receiver.CallbackUrl ?? _receiver.Start(new() { CallbackUrl = _options.CallbackUrl });
-                await _bootstrapper.EnsureManagerRunningAsync(_options.UpdateServerUrl, ct).ConfigureAwait(false);
-                // Registration can succeed remotely even when its response is lost.
-                _registered = true;
-                var registration = new RobotClientRegistration(_options.ClientId.Trim(), _instanceId, callback.ToString());
-                var session = await _bootstrapper.Client.RegisterClientAsync(registration, ct).ConfigureAwait(false);
-                if (!session.Ok || session.ClientId != registration.ClientId || session.InstanceId != _instanceId)
-                    throw new InvalidOperationException("Manager 没有确认当前客户端实例");
-                await _bootstrapper.Client.ConfigureConnectionAsync(_options, callback.ToString(), ct).ConfigureAwait(false);
-                var status = await _bootstrapper.Client.StartAsync(ct).ConfigureAwait(false);
-                while (!IsReady(status))
-                {
-                    var operation = await _bootstrapper.Client.GetOperationAsync(ct).ConfigureAwait(false);
-                    if (!operation.Running && operation.Phase == "failed")
-                        throw new InvalidOperationException("机器人启动失败：" + operation.Error);
-                    await Task.Delay(250, ct).ConfigureAwait(false);
-                    status = await _bootstrapper.Client.GetStatusAsync(ct).ConfigureAwait(false);
-                }
-                _connected = true;
-                return status;
+                return await _launcher.ConnectAsync(callback, restart, ct).ConfigureAwait(false);
             }
             catch
             {
@@ -99,32 +73,10 @@ public sealed class WechatRobotRuntime : IAsyncDisposable
         finally { _lifecycleGate.Release(); }
     }
 
-    static bool IsReady(RobotManagerStatus status) =>
-        status.Ok && status.WechatRunning && status.GvxApiReady && status.HttpCallbackReady;
-
     async Task DisconnectAsync()
     {
-        _connected = false;
-        try
-        {
-            if (_registered)
-            {
-                _registered = false;
-                using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(2));
-                try
-                {
-                    await _bootstrapper.Client.UnregisterClientAsync(
-                        _options.ClientId.Trim(), _instanceId, timeout.Token).ConfigureAwait(false);
-                }
-                catch { /* Preserve the connection error; unregister is instance-scoped. */ }
-            }
-            await _receiver.StopAsync().ConfigureAwait(false);
-        }
-        finally
-        {
-            _ownershipLease?.Dispose();
-            _ownershipLease = null;
-        }
+        try { await _receiver.StopAsync().ConfigureAwait(false); }
+        finally { _ownershipLease?.Dispose(); _ownershipLease = null; }
     }
 
     public ValueTask DisposeAsync()
@@ -136,47 +88,63 @@ public sealed class WechatRobotRuntime : IAsyncDisposable
     {
         _lifetime.Cancel();
         await _lifecycleGate.WaitAsync().ConfigureAwait(false);
-        try
+        try { await DisconnectAsync().ConfigureAwait(false); }
+        finally { _launcher.Dispose(); _lifecycleGate.Release(); }
+    }
+
+    void Publish<T>(EventHandler<T>? handlers, T value)
+    {
+        if (handlers is null) return;
+        foreach (var handler in handlers.GetInvocationList().Cast<EventHandler<T>>())
         {
-            _disposed = true;
-            await DisconnectAsync().ConfigureAwait(false);
+            try { handler(this, value); }
+            catch (Exception ex) { PublishError(ex); }
         }
-        finally
+    }
+
+    void PublishError(Exception error)
+    {
+        if (ReceiveError is not { } handlers) return;
+        foreach (var handler in handlers.GetInvocationList().Cast<EventHandler<Exception>>())
+            try { handler(this, error); } catch { }
+    }
+
+    static WechatRobotOptions ResolveOptions(WechatRobotOptions options)
+    {
+        if (string.IsNullOrWhiteSpace(options.ComponentDirectory)) throw new ArgumentException("组件目录不能为空", nameof(options));
+        if (options.GvxApiPort is < 1 or > 65535) throw new ArgumentOutOfRangeException(nameof(options), "内核端口无效");
+        foreach (var timeout in new[] { options.ConnectTimeout, options.StartTimeout })
+            if (timeout <= TimeSpan.Zero || timeout.TotalMilliseconds > uint.MaxValue - 1)
+                throw new ArgumentOutOfRangeException(nameof(options), "超时必须是有效的正时间间隔");
+        options = options with { ComponentDirectory = Path.GetFullPath(options.ComponentDirectory) };
+        // Read only the old component credentials. No daemon state or manager endpoint survives migration.
+        var legacy = Path.Combine(options.ComponentDirectory, "manager-settings.json");
+        if ((options.UpdateServerUrl is null || options.ComponentToken is null) && File.Exists(legacy))
         {
-            _bootstrapper.Dispose();
-            _lifecycleGate.Release();
-            GC.SuppressFinalize(this);
+            using var document = JsonDocument.Parse(File.ReadAllText(legacy));
+            var root = document.RootElement;
+            options = options with
+            {
+                UpdateServerUrl = options.UpdateServerUrl ?? (root.TryGetProperty("updateServerUrl", out var url) ? url.GetString() : null),
+                ComponentToken = options.ComponentToken ?? (root.TryGetProperty("componentToken", out var token) ? token.GetString() : null),
+            };
         }
+        if (options.UpdateServerUrl is not null &&
+            (!Uri.TryCreate(options.UpdateServerUrl, UriKind.Absolute, out var uri) || uri.Scheme is not ("http" or "https")))
+            throw new ArgumentException("组件更新地址必须是 HTTP 或 HTTPS URL", nameof(options));
+        return options;
     }
 }
 
 internal sealed class RuntimeOwnershipLease : IDisposable
 {
     readonly FileStream _stream;
-
     RuntimeOwnershipLease(FileStream stream) => _stream = stream;
-
-    public static RuntimeOwnershipLease Acquire(string lockPath)
+    internal static RuntimeOwnershipLease Acquire(string path)
     {
-        var directory = Path.GetDirectoryName(lockPath)
-            ?? throw new InvalidOperationException("运行时锁文件缺少目录");
-        Directory.CreateDirectory(directory);
-        try
-        {
-            var stream = new FileStream(
-                lockPath,
-                FileMode.OpenOrCreate,
-                FileAccess.ReadWrite,
-                FileShare.None);
-            return new RuntimeOwnershipLease(stream);
-        }
-        catch (IOException exception)
-        {
-            throw new InvalidOperationException(
-                "已有其他客户端正在管理微信机器人；当前程序仍可通过 RobotManagerClient 或 CVXClient 调用已运行的服务。",
-                exception);
-        }
+        Directory.CreateDirectory(Path.GetDirectoryName(path)!);
+        try { return new(new FileStream(path, FileMode.OpenOrCreate, FileAccess.ReadWrite, FileShare.None)); }
+        catch (IOException ex) { throw new InvalidOperationException("已有客户端占用此组件目录，请先关闭其连接", ex); }
     }
-
     public void Dispose() => _stream.Dispose();
 }
