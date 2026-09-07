@@ -23,6 +23,13 @@ runtime.MessageReceived += (_, _) => Interlocked.Increment(ref messages);
 try
 {
     var status = await runtime.ConnectAsync();
+    var versionRoot = Path.Combine(fixture.Root, "versions", "1.0.0");
+    Check(File.Exists(Path.Combine(versionRoot, "Weixin", "Weixin.exe")) &&
+        File.Exists(Path.Combine(versionRoot, "Weixin", "4.1.8.27", "runtime.dll")) &&
+        !Directory.Exists(Path.Combine(versionRoot, "weixin", "Weixin")),
+        "The official launcher and version directory are extracted directly into the component version");
+    Check(host.FindOwned(fixture.Root)[0].Executable == Path.Combine(versionRoot, "Weixin", "Weixin.exe"),
+        "Injection uses the manifest launcher instead of an executable in the official version directory");
     Check(status.ApiReady && !status.IsLoggedIn && host.Starts == 1, "A logged-out kernel is ready after local injection");
     await runtime.ConnectAsync();
     Check(host.Starts == 1, "Healthy repeated connection reuses the process");
@@ -113,6 +120,28 @@ using (var installer = new ComponentInstaller(downloadOptions))
 }
 await Expect<InvalidOperationException>(() => Task.Run(() => ComponentInstaller.SafePath(fixture.Root, "../escape")),
     "Manifest paths cannot escape the component directory");
+var expectedDefault = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "CVX");
+Check(new WechatRobotOptions().ComponentDirectory == expectedDefault, "The default root is CVX, not Sao");
+Check(WindowsWechatProcessHost.IsOwnedExecutable(fixture.Root, Path.Combine(fixture.Root, "versions", "1.0.0", "Portable", "Weixin.exe")) &&
+    WindowsWechatProcessHost.IsOwnedExecutable(fixture.Root, Path.Combine(fixture.Root, "versions", "1.0.0", "Weixin", "WeChat.exe")),
+    "Process ownership allows supported executable names without a hardcoded wrapper directory");
+Check(!WindowsWechatProcessHost.IsOwnedExecutable(fixture.Root, Path.Combine(fixture.Root + "-old", "versions", "1.0.0", "Weixin", "Weixin.exe")) &&
+    !WindowsWechatProcessHost.IsOwnedExecutable(fixture.Root, Path.Combine(fixture.Root, "versions", "1.0.0", "inject.exe")),
+    "Process ownership excludes other roots and non-WeChat executables");
+using (var installer = new ComponentInstaller(downloadOptions))
+{
+    var installed = await installer.EnsureInstalledAsync(default);
+    var protectedFiles = installed.Manifest.Files.Select(file => Path.Combine(installed.Directory, file.Name))
+        .Append(Path.Combine(installed.Directory, "manifest.json"))
+        .ToDictionary(path => path, path => Convert.ToHexString(SHA256.HashData(File.ReadAllBytes(path))));
+    File.Delete(Path.Combine(installed.Directory, "Weixin", "Weixin.exe"));
+    await installer.EnsureInstalledAsync(default);
+    Check(protectedFiles.All(item => Convert.ToHexString(SHA256.HashData(File.ReadAllBytes(item.Key))) == item.Value) &&
+        File.ReadAllText(Path.Combine(installed.Directory, "Weixin", "4.1.8.27", "runtime.dll")) == "official runtime",
+        "Bundle repair preserves the injector, DLL, manifest, ZIP and official runtime layout");
+    Check(File.ReadAllText(Path.Combine(installed.Directory, "Weixin", "Weixin.exe")) == "official launcher",
+        "A missing manifest launcher is repaired rather than replaced by a nested executable");
+}
 Console.WriteLine("All direct Client integration checks passed.");
 
 static void Check(bool value, string text)
@@ -155,13 +184,18 @@ sealed class Fixture : IDisposable
         File.WriteAllText(Path.Combine(directory, "inject.exe"), "fake injector");
         File.WriteAllText(Path.Combine(directory, "kernel.dll"), "fake kernel");
         using (var zip = ZipFile.Open(Path.Combine(directory, "wechat.zip"), ZipArchiveMode.Create))
-        using (var writer = new StreamWriter(zip.CreateEntry("Weixin/4.1.0/Weixin.exe").Open())) writer.Write("fake wechat");
+        {
+            using (var writer = new StreamWriter(zip.CreateEntry("Weixin/Weixin.exe").Open())) writer.Write("official launcher");
+            using (var writer = new StreamWriter(zip.CreateEntry("Weixin/4.1.8.27/runtime.dll").Open())) writer.Write("official runtime");
+            // A nested executable must not override the manifest's launcher.
+            using (var writer = new StreamWriter(zip.CreateEntry("Weixin/4.1.8.27/Weixin.exe").Open())) writer.Write("nested executable");
+        }
         object FileRecord(string name) => new { name, sha256 = Convert.ToHexString(SHA256.HashData(File.ReadAllBytes(Path.Combine(directory, name)))) };
         File.WriteAllText(Path.Combine(directory, "manifest.json"), JsonSerializer.Serialize(new
         {
-            version = "1.0.0", supportedWechatVersions = new[] { "4.1.0" },
+            version = "1.0.0", supportedWechatVersions = new[] { "4.1.8.27" },
             files = new { inject = FileRecord("inject.exe"), dll = FileRecord("kernel.dll"),
-                wechatBundle = new { name = "wechat.zip", sha256 = Convert.ToHexString(SHA256.HashData(File.ReadAllBytes(Path.Combine(directory, "wechat.zip")))), exePath = "Weixin/4.1.0/Weixin.exe" } },
+                wechatBundle = new { name = "wechat.zip", sha256 = Convert.ToHexString(SHA256.HashData(File.ReadAllBytes(Path.Combine(directory, "wechat.zip")))), exePath = "Weixin/Weixin.exe" } },
             launchArgs = new { },
         }));
         var archive = Path.Combine(Root, "package.zip"); ZipFile.CreateFromDirectory(directory, archive); Package = File.ReadAllBytes(archive);

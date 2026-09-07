@@ -47,7 +47,7 @@ await runtime.RestartAsync();
 |---|---|
 | `UpdateServerUrl` | 组件服务地址，首次安装或修复损坏文件时需要 |
 | `ComponentToken` | 仅用于组件版本查询和安装包下载 |
-| `ComponentDirectory` | `%LOCALAPPDATA%\Sao\WechatRobot`，兼容原组件目录 |
+| `ComponentDirectory` | `%LOCALAPPDATA%\CVX` |
 | `GvxApiPort` | `19088` |
 | `CallbackUrl` | `http://127.0.0.1:5000/api/recvMsg`，仅本机 HTTP |
 | `ConnectTimeout` | 整个连接或重启过程最多 12 分钟 |
@@ -56,6 +56,25 @@ await runtime.RestartAsync();
 已安装且校验通过的组件直接使用，不要求 Token，不自动检查或升级。组件缺失或损坏时使用 Bearer Token 下载，校验大小、SHA-256、清单文件及便携微信兼容版本后安装。Token 不发送到本机内核，也不写入运行状态文件。
 
 Runtime 返回 `WechatRobotStatus`：`ApiReady`、`IsLoggedIn`、`ComponentVersion` 和实际 `CallbackUrl`。启动失败、超时或取消通过异常返回；可在同一 Runtime 上重试。
+
+## 组件目录
+
+```text
+%LOCALAPPDATA%\CVX\
+├─ client-runtime.json
+├─ .runtime-owner.lock
+├─ downloads\
+└─ versions\<组件版本>\
+   ├─ inject.exe
+   ├─ libGLESv1.dll
+   ├─ manifest.json
+   ├─ Weixin.zip
+   └─ Weixin\
+      ├─ Weixin.exe
+      └─ 4.1.8.27\
+```
+
+便携包直接解压到组件版本目录，保留 ZIP 自带的目录结构；不额外添加 `weixin` 包装层。`manifest.json` 的 `exePath: Weixin/Weixin.exe` 相对组件版本目录解析。官方版本子目录和文件保持原样，组件版本与微信内部版本独立。
 
 ## 退出与回调
 
@@ -68,10 +87,10 @@ Runtime 返回 `WechatRobotStatus`：`ApiReady`、`IsLoggedIn`、`ComponentVersi
 ## 从独立 Manager 迁移
 
 - 部署新版前退出旧 Manager，并停止外部配置的旧 Manager 自启动，避免它和 Client 同时管理微信。
-- 删除 `ManagerAddress`、`ClientId` 及 Manager 本体下载配置；使用 `ComponentDirectory` 指向原组件数据目录，而非 Manager EXE 安装目录。
+- 删除 `ManagerAddress`、`ClientId` 及 Manager 本体下载配置。默认组件根目录为 `%LOCALAPPDATA%\CVX`，不自动回退到 `%LOCALAPPDATA%\Sao\WechatRobot`。
 - `RobotManagerClient` 及其协议模型已删除；普通恢复用 `ConnectAsync`，明确重启用 `RestartAsync`。
 - 未显式设置组件服务地址或 Token 时，可从组件目录的旧 `manager-settings.json` 读取这两个字段。旧 API Token、自动启动及期望状态均不使用。
-- 旧组件目录继续复用。旧运行实例没有新的进程/回调记录，首次连接会重新注入一次，建立可验证的记录。
+- 默认不会读取、写入或管理旧 Sao 目录。迁移前关闭旧目录运行的微信，可将旧目录的 `versions` 复制到 CVX；也可配置组件服务后重新下载。复制的 inject、DLL、manifest 和 ZIP 可复用，便携包会在新版本目录直接解压。不要同时运行两个根目录的微信，也不要复制旧的 `client-runtime.json`。
 - 原来配置过非默认内核端口或回调地址的调用方，需要在新选项中明确设置。
 
 ## 构建与验证

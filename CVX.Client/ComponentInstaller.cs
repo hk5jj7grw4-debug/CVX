@@ -149,10 +149,33 @@ internal sealed class ComponentInstaller(WechatRobotOptions options) : IDisposab
     {
         var archive = SafePath(directory, manifest.WechatBundle.Name);
         if (!File.Exists(archive)) throw new InvalidOperationException($"缺少便携微信包 {manifest.WechatBundle.Name}");
-        var target = Path.Combine(directory, "weixin");
-        if (Directory.Exists(target)) Directory.Delete(target, true);
-        Directory.CreateDirectory(target);
-        ExtractArchive(archive, target);
+        // Stage first so repair replaces only bundle content, never the version directory itself.
+        var staging = Path.Combine(directory, ".wechat-" + Guid.NewGuid().ToString("N") + ".staging");
+        try
+        {
+            ExtractArchive(archive, staging);
+            if (ResolveBundledWechatExe(staging, manifest) is null)
+                throw new InvalidOperationException("便携微信包缺少清单指定的可执行文件");
+            var entries = Directory.GetFileSystemEntries(staging);
+            var protectedPaths = manifest.Files.Select(file => SafePath(directory, file.Name))
+                .Append(Path.Combine(directory, "manifest.json")).ToArray();
+            foreach (var entry in entries)
+            {
+                var destination = SafePath(directory, Path.GetFileName(entry));
+                if (protectedPaths.Any(path => path.Equals(destination, StringComparison.OrdinalIgnoreCase)
+                    || path.StartsWith(destination + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase)))
+                    throw new InvalidOperationException("便携微信包不能覆盖组件清单、注入器、DLL 或压缩包");
+            }
+            foreach (var entry in entries)
+            {
+                var destination = SafePath(directory, Path.GetFileName(entry));
+                if (Directory.Exists(destination)) Directory.Delete(destination, true);
+                else if (File.Exists(destination)) File.Delete(destination);
+                if (Directory.Exists(entry)) Directory.Move(entry, destination);
+                else File.Move(entry, destination);
+            }
+        }
+        finally { if (Directory.Exists(staging)) Directory.Delete(staging, true); }
     }
 
     internal static string EnsureBundleExtracted(string directory, RobotManifest manifest)
@@ -176,24 +199,10 @@ internal sealed class ComponentInstaller(WechatRobotOptions options) : IDisposab
     }
 
     static string BundledWechatExe(string directory, RobotManifest manifest) =>
-        SafePath(Path.Combine(directory, "weixin"), manifest.WechatExePath);
+        SafePath(directory, manifest.WechatExePath);
 
     static string? ResolveBundledWechatExe(string directory, RobotManifest manifest)
     {
-        var parts = manifest.WechatExePath.Split(['/', '\\'], StringSplitOptions.RemoveEmptyEntries);
-        if (parts.Length >= 2)
-        {
-            var root = Path.Combine(directory, "weixin", parts[0]);
-            if (Directory.Exists(root))
-            {
-                return Directory.GetDirectories(root)
-                    .Select(path => (Path: path, Version: Path.GetFileName(path)))
-                    .Where(item => Version.TryParse(item.Version, out _))
-                    .OrderByDescending(item => Version.Parse(item.Version))
-                    .Select(item => Path.Combine(item.Path, Path.GetFileName(manifest.WechatExePath)))
-                    .FirstOrDefault(File.Exists);
-            }
-        }
         var exact = BundledWechatExe(directory, manifest);
         return File.Exists(exact) ? exact : null;
     }
@@ -201,7 +210,7 @@ internal sealed class ComponentInstaller(WechatRobotOptions options) : IDisposab
     static string? DetectBundledWechatVersion(string directory, RobotManifest manifest)
     {
         var first = manifest.WechatExePath.Split('/', '\\')[0];
-        var root = Path.Combine(directory, "weixin", first);
+        var root = SafePath(directory, first);
         if (!Directory.Exists(root)) return null;
         return Directory.GetDirectories(root)
             .Select(Path.GetFileName)

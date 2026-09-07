@@ -8,7 +8,7 @@ public sealed record WechatRobotOptions
     public string? UpdateServerUrl { get; init; }
     public string? ComponentToken { get; init; }
     public string ComponentDirectory { get; init; } = Path.Combine(
-        Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "Sao", "WechatRobot");
+        Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "CVX");
     public int GvxApiPort { get; init; } = 19088;
     public string CallbackUrl { get; init; } = WechatCallbackReceiver.DefaultCallbackUrl;
     public TimeSpan ConnectTimeout { get; init; } = TimeSpan.FromMinutes(12);

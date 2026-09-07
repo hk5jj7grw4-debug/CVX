@@ -21,7 +21,6 @@ internal sealed class WindowsWechatProcessHost : IWechatProcessHost
     public IReadOnlyList<WechatProcess> FindOwned(string componentDirectory)
     {
         if (!OperatingSystem.IsWindows()) return [];
-        var versions = Path.GetFullPath(Path.Combine(componentDirectory, "versions")) + Path.DirectorySeparatorChar;
         var result = new List<WechatProcess>();
         foreach (var name in new[] { "Weixin", "WeChat" })
         foreach (var process in Process.GetProcessesByName(name))
@@ -31,15 +30,23 @@ internal sealed class WindowsWechatProcessHost : IWechatProcessHost
                 try
                 {
                     var exe = process.MainModule?.FileName;
-                    if (exe is null || !exe.StartsWith(versions, StringComparison.OrdinalIgnoreCase)) continue;
-                    var relative = Path.GetRelativePath(versions, exe).Split(Path.DirectorySeparatorChar);
-                    if (relative.Length < 3 || !relative[1].Equals("weixin", StringComparison.OrdinalIgnoreCase)) continue;
+                    if (exe is null || !IsOwnedExecutable(componentDirectory, exe)) continue;
                     result.Add(new(process.Id, process.StartTime.ToUniversalTime().Ticks, Path.GetFullPath(exe)));
                 }
                 catch (Exception ex) when (ex is InvalidOperationException or System.ComponentModel.Win32Exception) { }
             }
         }
         return result;
+    }
+
+    internal static bool IsOwnedExecutable(string componentDirectory, string executable)
+    {
+        var versions = Path.GetFullPath(Path.Combine(componentDirectory, "versions")) + Path.DirectorySeparatorChar;
+        var path = Path.GetFullPath(executable);
+        if (!path.StartsWith(versions, StringComparison.OrdinalIgnoreCase)) return false;
+        var name = Path.GetFileName(path);
+        return name.Equals("Weixin.exe", StringComparison.OrdinalIgnoreCase)
+            || name.Equals("WeChat.exe", StringComparison.OrdinalIgnoreCase);
     }
 
     public async Task StopAsync(WechatProcess owned, CancellationToken ct)
