@@ -1,4 +1,4 @@
-name: Build Windows SDK artifacts
+name: Build CVX artifacts
 
 on:
   push:
@@ -30,7 +30,7 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@v7
         with:
-          go-version-file: GVxSdk.Go/go.mod
+          go-version-file: CVX.Sdk.Go/go.mod
           cache: false
 
       - name: Resolve package version
@@ -48,42 +48,42 @@ jobs:
           "version=$version" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
 
       - name: Restore .NET projects
-        run: dotnet restore CVXkernel.sln
+        run: dotnet restore CVX.sln
 
       - name: Build .NET projects
-        run: dotnet build CVXkernel.sln -c Release --no-restore
+        run: dotnet build CVX.sln -c Release --no-restore
 
-      - name: Run .NET tests
-        run: dotnet run --project CVXkernel.Client.Tests -c Release --no-build
+      - name: Run Client integration checks
+        run: dotnet run --project tests/CVX.Client.Tests -c Release
 
       - name: Run Go tests
-        working-directory: GVxSdk.Go
+        working-directory: CVX.Sdk.Go
         run: go test ./...
 
       - name: Pack NuGet packages
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Path artifacts -Force | Out-Null
-          dotnet pack CVXkernel.Client/CVXkernel.Client.csproj `
+          dotnet pack CVX.Client/CVX.Client.csproj `
             -c Release -o artifacts `
             -p:Version=${{ env.CVX_VERSION }} `
             -p:IncludeSymbols=true -p:SymbolPackageFormat=snupkg
-          dotnet pack GVxSdk.Client/GVxSdk.Client.csproj `
+          dotnet pack CVX.Sdk.DotNet/CVX.Sdk.DotNet.csproj `
             -c Release --no-build -o artifacts `
             -p:IncludeSymbols=true -p:SymbolPackageFormat=snupkg
 
       - name: Create DLL bundle and checksums
         shell: pwsh
         run: |
-          $bundle = "artifacts/CVXkernel-${{ env.CVX_VERSION }}-dotnet8-win"
+          $bundle = "artifacts/CVX-${{ env.CVX_VERSION }}-dotnet8-win"
           New-Item -ItemType Directory -Path $bundle -Force | Out-Null
-          Copy-Item CVXkernel.Client/bin/Release/net8.0/CVXkernel.Client.dll $bundle
-          Copy-Item CVXkernel.Client/bin/Release/net8.0/CVXkernel.Client.xml $bundle
-          Copy-Item GVxSdk.Client/bin/Release/net8.0/GVxSdk.Client.dll $bundle
-          Copy-Item GVxSdk.Client/bin/Release/net8.0/GVxSdk.Client.xml $bundle
+          Copy-Item CVX.Client/bin/Release/net8.0/CVX.Client.dll $bundle
+          Copy-Item CVX.Client/bin/Release/net8.0/CVX.Client.xml $bundle
+          Copy-Item CVX.Sdk.DotNet/bin/Release/net8.0/CVX.Sdk.DotNet.dll $bundle
+          Copy-Item CVX.Sdk.DotNet/bin/Release/net8.0/CVX.Sdk.DotNet.xml $bundle
           Copy-Item README.md, LICENSE $bundle
           Compress-Archive -Path "$bundle/*" `
-            -DestinationPath "artifacts/CVXkernel-${{ env.CVX_VERSION }}-dotnet8-win.zip" -Force
+            -DestinationPath "artifacts/CVX-${{ env.CVX_VERSION }}-dotnet8-win.zip" -Force
           Remove-Item -LiteralPath $bundle -Recurse
 
           $lines = Get-ChildItem artifacts -File |
@@ -98,7 +98,7 @@ jobs:
       - name: Upload workflow artifacts
         uses: actions/upload-artifact@v7
         with:
-          name: CVXkernel-${{ env.CVX_VERSION }}-windows-sdk
+          name: CVX-${{ env.CVX_VERSION }}-windows-sdk
           path: artifacts/*
           if-no-files-found: error
 
@@ -111,7 +111,7 @@ jobs:
           $tag = $env:GITHUB_REF_NAME
           gh release view $tag *> $null
           if ($LASTEXITCODE -ne 0) {
-            gh release create $tag --title "CVXkernel $tag" --generate-notes
+            gh release create $tag --title "CVX $tag" --generate-notes
           }
           gh release upload $tag artifacts/* --clobber
 
@@ -134,7 +134,7 @@ jobs:
       - name: Download NuGet packages
         uses: actions/download-artifact@v8
         with:
-          name: CVXkernel-${{ needs.build.outputs.package-version }}-windows-sdk
+          name: CVX-${{ needs.build.outputs.package-version }}-windows-sdk
           path: artifacts
 
       - name: NuGet login

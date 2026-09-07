@@ -1,0 +1,31 @@
+﻿
+Microsoft Visual Studio Solution File, Format Version 12.00
+# Visual Studio Version 17
+VisualStudioVersion = 17.0.31903.59
+MinimumVisualStudioVersion = 10.0.40219.1
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "CVX.Client", "CVX.Client\CVX.Client.csproj", "{AB7FF477-C05C-48CE-8DB6-E887CB9BE402}"
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "CVX.Sdk.DotNet", "CVX.Sdk.DotNet\CVX.Sdk.DotNet.csproj", "{CE00B1BF-E1E4-49A8-83BE-651752D122BA}"
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "CVX.Manager", "CVX.Manager\CVX.Manager.csproj", "{CD42567D-0EB1-4A31-ADFD-0883C399DB80}"
+EndProject
+Global
+	GlobalSection(SolutionConfigurationPlatforms) = preSolution
+		Debug|Any CPU = Debug|Any CPU
+		Release|Any CPU = Release|Any CPU
+	EndGlobalSection
+	GlobalSection(ProjectConfigurationPlatforms) = postSolution
+		{AB7FF477-C05C-48CE-8DB6-E887CB9BE402}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{AB7FF477-C05C-48CE-8DB6-E887CB9BE402}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{AB7FF477-C05C-48CE-8DB6-E887CB9BE402}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{AB7FF477-C05C-48CE-8DB6-E887CB9BE402}.Release|Any CPU.Build.0 = Release|Any CPU
+		{CE00B1BF-E1E4-49A8-83BE-651752D122BA}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{CE00B1BF-E1E4-49A8-83BE-651752D122BA}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{CE00B1BF-E1E4-49A8-83BE-651752D122BA}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{CE00B1BF-E1E4-49A8-83BE-651752D122BA}.Release|Any CPU.Build.0 = Release|Any CPU
+		{CD42567D-0EB1-4A31-ADFD-0883C399DB80}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{CD42567D-0EB1-4A31-ADFD-0883C399DB80}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{CD42567D-0EB1-4A31-ADFD-0883C399DB80}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{CD42567D-0EB1-4A31-ADFD-0883C399DB80}.Release|Any CPU.Build.0 = Release|Any CPU
+	EndGlobalSection
+EndGlobal

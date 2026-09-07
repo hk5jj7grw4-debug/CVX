@@ -1,0 +1,22 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net8.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <GenerateDocumentationFile>true</GenerateDocumentationFile>
+    <NoWarn>$(NoWarn);1591</NoWarn>
+    <PackageId>CVX.Sdk.DotNet</PackageId>
+    <Version>0.1.5</Version>
+    <Authors>Sao</Authors>
+    <Description>Managed .NET client for the local gVx WeChat middleware HTTP API, distributed as part of CVX.</Description>
+    <PackageTags>cvx;wechat;sdk;windows</PackageTags>
+    <PackageLicenseExpression>MIT</PackageLicenseExpression>
+    <PackageReadmeFile>README.md</PackageReadmeFile>
+    <PackageProjectUrl>https://github.com/hk5jj7grw4-debug/CVX</PackageProjectUrl>
+    <RepositoryUrl>https://github.com/hk5jj7grw4-debug/CVX.git</RepositoryUrl>
+    <RepositoryType>git</RepositoryType>
+  </PropertyGroup>
+  <ItemGroup>
+    <None Include="../README.md" Pack="true" PackagePath="/" Link="README.md" />
+  </ItemGroup>
+</Project>
